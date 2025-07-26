@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="%PUBLIC_URL%/favicon.ico" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f97316" />
+    <meta name="description" content="AI 기반 기타 타브악보 자동 생성기 - 음악 파일을 업로드하면 AI가 자동으로 기타 코드와 타브 악보를 만들어드립니다" />
+    <meta name="keywords" content="기타, 타브, 악보, AI, 코드, 음악, 분석" />
+    <meta name="author" content="AI Guitar Tab Generator" />
+    
+    <!-- Open Graph -->
+    <meta property="og:title" content="AI 기타 타브 생성기" />
+    <meta property="og:description" content="음악 파일을 업로드하면 AI가 자동으로 기타 타브 악보를 만들어드립니다" />
+    <meta property="og:type" content="website" />
+    
+    <link rel="apple-touch-icon" href="%PUBLIC_URL%/logo192.png" />
+    <link rel="manifest" href="%PUBLIC_URL%/manifest.json" />
+    
+    <title>🎸 AI 기타 타브 생성기 - 자동 코드 분석 & 악보 생성</title>
+    
+    <style>
+      /* 초기 로딩 스타일 */
+      .loading-screen {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 9999;
+      }
+      
+      .loading-content {
+        text-align: center;
+        color: white;
+      }
+      
+      .loading-spinner {
+        width: 50px;
+        height: 50px;
+        border: 4px solid rgba(255, 255, 255, 0.3);
+        border-top: 4px solid white;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+        margin: 0 auto 20px;
+      }
+      
+      @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+    </style>
+  </head>
+  <body>
+    <noscript>이 앱을 실행하려면 JavaScript를 활성화해야 합니다.</noscript>
+    
+    <!-- 초기 로딩 화면 -->
+    <div id="loading" class="loading-screen">
+      <div class="loading-content">
+        <div class="loading-spinner"></div>
+        <h2>🎸 AI 기타 타브 생성기</h2>
+        <p>로딩 중...</p>
+      </div>
+    </div>
+    
+    <div id="root"></div>
+    
+    <script>
+      // 로딩 화면 제거
+      window.addEventListener('load', function() {
+        setTimeout(function() {
+          const loading = document.getElementById('loading');
+          if (loading) {
+            loading.style.opacity = '0';
+            setTimeout(function() {
+              loading.remove();
+            }, 300);
+          }
+        }, 1000);
+      });
+    </script>
+  </body>
+</html>
