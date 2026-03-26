@@ -78,27 +78,36 @@ def beats_to_alphatab_score(
     notes_by_beat: Dict[int, List[NoteEvent]] | None = None,
     lyrics_by_beat: List[str | None] | None = None,
     chord_by_beat: List[str | None] | None = None,
+    technique_by_beat: List[str | None] | None = None,
 ) -> Dict[str, Any]:
     """
     beat grid(beat_times 길이) 기준으로 alphaTab 렌더용 JSON score를 만든다.
     - notes_by_beat: beat index -> NoteEvent 리스트
     - lyrics_by_beat: beat index -> lyric 텍스트
     - chord_by_beat: beat index -> chord 텍스트
+    - technique_by_beat: beat index -> 주법(스트로크 등) 짧은 라벨
     """
     n = len(beat_times)
     notes_by_beat = notes_by_beat or {}
     lyrics_by_beat = lyrics_by_beat or [None for _ in range(n)]
     chord_by_beat = chord_by_beat or [None for _ in range(n)]
+    technique_by_beat = technique_by_beat or [None for _ in range(n)]
     chords = chords or []
 
     beats: List[Dict[str, Any]] = []
     for i in range(n):
         beat_notes = notes_by_beat.get(i, [])
+        lyric = lyrics_by_beat[i] if i < len(lyrics_by_beat) else None
+        tech = technique_by_beat[i] if i < len(technique_by_beat) else None
+        if lyric and tech:
+            lyric = f"{lyric} {tech}"
+        elif tech and not lyric:
+            lyric = tech
         beats.append(
             {
                 "time": float(beat_times[i]),
                 "chord": chord_by_beat[i] if i < len(chord_by_beat) else None,
-                "lyric": lyrics_by_beat[i] if i < len(lyrics_by_beat) else None,
+                "lyric": lyric,
                 "notes": [
                     {
                         "string": int(ev.string),

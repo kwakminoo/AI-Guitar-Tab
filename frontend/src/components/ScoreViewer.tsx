@@ -1,83 +1,121 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import type { AlphaTabBeat, AlphaTabNote, AlphaTabScore } from "@/types/alphatabScore";
+import { createEmptyEditableScore } from "@/lib/emptyAlphatabScore";
 
-type AlphaTabNote = {
-  string: number;
-  fret: number;
-  start: number;
-  end: number;
-};
+export type { AlphaTabScore } from "@/types/alphatabScore";
 
-type AlphaTabBeat = {
-  time: number;
-  chord: string | null;
-  lyric: string | null;
-  notes: AlphaTabNote[];
-};
+function IconPlay({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden>
+      <path d="M8 5v14l11-7-11-7z" />
+    </svg>
+  );
+}
 
-type AlphaTabTrack = {
-  name: string;
-  type: string;
-  strings: number;
-  tuning: number[];
-  beats: AlphaTabBeat[];
-};
+function IconPause({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden>
+      <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
+    </svg>
+  );
+}
 
-export type AlphaTabScore = {
-  version: number;
-  meta: {
-    title: string;
-    tempo: number;
-    timeSignature: { numerator: number; denominator: number };
-    key: string;
-    capo: number;
-    chords?: string[];
-  };
-  tracks: AlphaTabTrack[];
-};
+function IconHourglass({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+      <path d="M8 2h8v4l-4 4-4-4V2zM8 22h8v-4l-4-4-4 4v4z" strokeLinejoin="round" />
+      <path d="M12 10v4" strokeLinecap="round" />
+    </svg>
+  );
+}
 
-type AlphaTabStateChanged = {
-  on: (cb: (e: unknown) => void) => void;
-  off: (cb: (e: unknown) => void) => void;
-};
+function IconMetronome({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+      <path d="M12 3v2M9 21h6M10 7l-3 12h10l-3-12" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M10 7h4" strokeLinecap="round" />
+    </svg>
+  );
+}
 
-type AlphaTabPlayer = {
-  pause: () => void;
-  play: () => void;
-  stateChanged?: AlphaTabStateChanged;
-};
+function IconLoop({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+      <path
+        d="M17 1l4 4-4 4M21 5H9a4 4 0 0 0-4 4v1M7 23l-4-4 4-4M3 19h12a4 4 0 0 0 4-4v-1"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
 
-type AlphaTabApiHandle = {
-  tex: (tex: string) => void;
-  player?: AlphaTabPlayer;
-  destroy?: () => void;
-  __cleanup?: () => void;
-};
+function IconPrint({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+      <path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v8H6v-8z" strokeLinejoin="round" />
+    </svg>
+  );
+}
 
-type AlphaTabUmd = {
+type AlphaTabModuleLike = {
   Settings: new () => {
     display: {
-      renderTracks: number[];
-      resources: { colorBackground: number; colorScore: number; colorTab: number };
       layoutMode: unknown;
+      scale: number;
       padding: number[];
-      tempo: number;
+    };
+    player: {
+      enablePlayer: boolean;
+      soundFont: string;
+      scrollElement?: HTMLElement;
     };
   };
-  LayoutMode: { Page: unknown };
-  AlphaTabApi: new (container: HTMLDivElement, settings: unknown) => AlphaTabApiHandle;
+  LayoutMode: {
+    Horizontal: unknown;
+    Page: unknown;
+  };
+  synth: {
+    PlayerState: {
+      Playing: unknown;
+    };
+  };
+  AlphaTabApi: new (container: HTMLElement, settings: unknown) => AlphaTabApiLike;
 };
 
-/** 유튜브 링크 없이 초기 로드 시 표시할 빈 악보(오선보+타브, 4마디 휴지) */
-const EMPTY_ALPHATEX = [
-  '\\title "빈 악보"',
-  "\\tempo 90",
-  "\\ts (4 4)",
-  '\\track "Guitar"',
-  "\\staff {tabs}",
-  ":4 r r r r | :4 r r r r | :4 r r r r | :4 r r r r |",
-].join(" ");
+type AlphaTabApiLike = {
+  settings: {
+    display: {
+      layoutMode: unknown;
+      scale: number;
+    };
+  };
+  tracks: Array<{ index: number }>;
+  countInVolume: number;
+  metronomeVolume: number;
+  isLooping: boolean;
+  scoreLoaded: {
+    on: (cb: (score: { tracks: Array<{ index: number; name: string }> }) => void) => void;
+  };
+  renderStarted: { on: (cb: () => void) => void };
+  renderFinished: { on: (cb: () => void) => void };
+  soundFontLoad: { on: (cb: (e: { loaded: number; total: number }) => void) => void };
+  playerReady: { on: (cb: () => void) => void };
+  playerStateChanged: { on: (cb: (e: { state: unknown }) => void) => void };
+  playerPositionChanged: {
+    on: (cb: (e: { currentTime: number; endTime: number }) => void) => void;
+  };
+  renderTracks: (tracks: unknown[]) => void;
+  updateSettings: () => void;
+  render: () => void;
+  tex: (tex: string) => void;
+  print: () => void;
+  playPause: () => void;
+  stop: () => void;
+  destroy: () => void;
+};
 
 interface ScoreViewerProps {
   score: AlphaTabScore | null;
@@ -85,68 +123,159 @@ interface ScoreViewerProps {
   songArtist?: string | null;
   songLyrics?: string | null;
   songChords?: string[];
+  /** 사이드바: 유튜브 URL + 불러오기 */
+  youtubeUrl?: string;
+  onYoutubeUrlChange?: (value: string) => void;
+  onAnalyze?: () => void;
+  isAnalyzing?: boolean;
+  statusMessage?: string | null;
+  analyzeError?: string | null;
 }
 
 export const ScoreViewer: React.FC<ScoreViewerProps> = ({
   score,
   songTitle,
   songArtist,
+  youtubeUrl = "",
+  onYoutubeUrlChange,
+  onAnalyze,
+  isAnalyzing = false,
+  statusMessage,
+  analyzeError,
 }) => {
-  const alphaTabContainerRef = useRef<HTMLDivElement | null>(null);
-  const apiRef = useRef<AlphaTabApiHandle | null>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
+  const mainRef = useRef<HTMLDivElement | null>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const overlayRef = useRef<HTMLDivElement | null>(null);
+  const trackListRef = useRef<HTMLDivElement | null>(null);
+  const apiRef = useRef<AlphaTabApiLike | null>(null);
+  const alphaTabModuleRef = useRef<AlphaTabModuleLike | null>(null);
+  const [nullBaseline] = useState<AlphaTabScore>(() => createEmptyEditableScore());
   const [renderError, setRenderError] = useState<string | null>(null);
+  const [isPlayerReady, setIsPlayerReady] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [songPosition, setSongPosition] = useState("00:00 / 00:00");
+  const [playerProgress, setPlayerProgress] = useState("0%");
+  const [isCountIn, setIsCountIn] = useState(false);
+  const [isMetronome, setIsMetronome] = useState(false);
+  const [isLooping, setIsLooping] = useState(false);
+  const [zoom, setZoom] = useState("100");
+  const [layout, setLayout] = useState<"page" | "horizontal">("page");
+  const previousSecondRef = useRef(-1);
+
+  const workingScore = score ?? nullBaseline;
+
+  const normalizedScore = useMemo(
+    () => normalizeScoreForRendering(workingScore),
+    [workingScore],
+  );
+  const modelError =
+    normalizedScore === null ? "악보 데이터 형식이 올바르지 않습니다." : null;
 
   useEffect(() => {
-    if (!alphaTabContainerRef.current) return;
+    if (!mainRef.current) return;
 
     let disposed = false;
-    alphaTabContainerRef.current.innerHTML = "";
+    mainRef.current.innerHTML = "";
+    trackListRef.current?.replaceChildren();
+    previousSecondRef.current = -1;
 
-    // 빈 상태(score === null)에서는 alphaTab 렌더를 돌리지 않음.
-    // 현재 EMPTY/오선 렌더 경로에서 TypeError가 발생해 UI까지 죽는 문제가 있음.
-    if (!score) {
-      setRenderError(null);
-      setIsPlaying(false);
-      if (apiRef.current?.__cleanup) apiRef.current.__cleanup();
-      apiRef.current = null;
-      return;
-    }
+    if (!normalizedScore) return;
 
-    const normalized = score ? normalizeScoreForRendering(score) : null;
-    if (score && !normalized) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setRenderError("악보 데이터 형식이 올바르지 않습니다.");
-      return;
-    }
-
-    const tex = score && normalized ? buildAlphaTex(normalized) : EMPTY_ALPHATEX;
-    const tempo = normalized?.meta.tempo ?? score?.meta?.tempo ?? 90;
+    const tex = buildAlphaTex(normalizedScore);
 
     (async () => {
-      await loadAlphaTabUmd();
-      if (disposed || !alphaTabContainerRef.current) return;
-
-      const alphaTab = (window as unknown as { alphaTab?: AlphaTabUmd }).alphaTab;
-      if (!alphaTab) throw new Error("alphaTab UMD 로드에 실패했습니다.");
+      const alphaTab = await loadAlphaTabUmd();
+      if (disposed || !mainRef.current) return;
+      alphaTabModuleRef.current = alphaTab;
 
       const settings = new alphaTab.Settings();
-      settings.display.renderTracks = [0];
-      settings.display.resources = {
-        // 아래에 있는 빈 악보 가이드를 유지하기 위해 배경을 투명하게 둔다.
-        colorBackground: 0x00000000,
-        colorScore: 0xff000000,
-        colorTab: 0xff000000,
-      };
-      settings.display.layoutMode = alphaTab.LayoutMode.Page;
-      // 컨테이너 상단 여백을 줄여서(제목 아래 영역에) 더 위에 렌더되게 한다.
-      settings.display.padding = [10, 0];
-      settings.display.tempo = tempo;
+      settings.display.layoutMode =
+        layout === "horizontal" ? alphaTab.LayoutMode.Horizontal : alphaTab.LayoutMode.Page;
+      settings.display.scale = Number.parseInt(zoom, 10) / 100;
+      settings.display.padding = [10, 10, 10, 10];
+      settings.player.enablePlayer = true;
+      settings.player.soundFont =
+        "https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/soundfont/sonivox.sf2";
+      if (viewportRef.current) {
+        settings.player.scrollElement = viewportRef.current;
+      }
 
-      const api = new alphaTab.AlphaTabApi(alphaTabContainerRef.current, settings);
+      const api = new alphaTab.AlphaTabApi(mainRef.current, settings);
       apiRef.current = api;
 
-      // 레이아웃이 아직 계산되기 전일 수 있어, 다음 프레임에 렌더
+      const createTrackItem = (track: { index: number; name: string }) => {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className =
+          "w-full rounded-md px-3 py-2 text-left text-xs font-medium text-zinc-600 transition hover:bg-zinc-200/70";
+        item.textContent = track.name || `Track ${track.index + 1}`;
+        item.onclick = () => {
+          api.renderTracks([track as never]);
+        };
+        item.dataset.trackIndex = String(track.index);
+        return item;
+      };
+
+      const markActiveTracks = () => {
+        const list = trackListRef.current;
+        if (!list) return;
+        const activeIndices = new Set<number>();
+        api.tracks.forEach((t) => activeIndices.add(t.index));
+        list.querySelectorAll<HTMLButtonElement>("button[data-track-index]").forEach((btn) => {
+          const idx = Number.parseInt(btn.dataset.trackIndex ?? "-1", 10);
+          const active = activeIndices.has(idx);
+          btn.className = active
+            ? "w-full rounded-md bg-zinc-900 px-3 py-2 text-left text-xs font-semibold text-white"
+            : "w-full rounded-md px-3 py-2 text-left text-xs font-medium text-zinc-600 transition hover:bg-zinc-200/70";
+        });
+      };
+
+      const formatDuration = (milliseconds: number) => {
+        let seconds = milliseconds / 1000;
+        const minutes = (seconds / 60) | 0;
+        seconds = (seconds - minutes * 60) | 0;
+        return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+      };
+
+      api.scoreLoaded.on((loadedScore) => {
+        const list = trackListRef.current;
+        if (!list) return;
+        list.replaceChildren();
+        loadedScore.tracks.forEach((track) => {
+          list.appendChild(createTrackItem(track as never));
+        });
+        markActiveTracks();
+      });
+
+      api.renderStarted.on(() => {
+        if (overlayRef.current) overlayRef.current.style.display = "flex";
+        markActiveTracks();
+      });
+
+      api.renderFinished.on(() => {
+        if (overlayRef.current) overlayRef.current.style.display = "none";
+      });
+
+      api.soundFontLoad.on((e) => {
+        const percentage = Math.floor((e.loaded / e.total) * 100);
+        setPlayerProgress(`${percentage}%`);
+      });
+
+      api.playerReady.on(() => {
+        setIsPlayerReady(true);
+      });
+
+      api.playerStateChanged.on((e) => {
+        setIsPlaying(e.state === alphaTab.synth.PlayerState.Playing);
+      });
+
+      api.playerPositionChanged.on((e) => {
+        const currentSeconds = (e.currentTime / 1000) | 0;
+        if (currentSeconds === previousSecondRef.current) return;
+        previousSecondRef.current = currentSeconds;
+        setSongPosition(`${formatDuration(e.currentTime)} / ${formatDuration(e.endTime)}`);
+      });
+
       requestAnimationFrame(() => {
         try {
           setRenderError(null);
@@ -154,21 +283,9 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
         } catch (e) {
           const msg = e instanceof Error ? e.message : "AlphaTab 렌더 실패";
           setRenderError(msg);
-          // 콘솔로도 남겨서 원인 파악이 가능하게 한다
           console.error(e);
         }
       });
-
-      const onStateChanged = (e: unknown) => {
-        const state = (e as { state?: unknown } | undefined)?.state;
-        setIsPlaying(String(state).toLowerCase() === "playing");
-      };
-      api.player?.stateChanged?.on(onStateChanged);
-
-      api.__cleanup = () => {
-        api.player?.stateChanged?.off(onStateChanged);
-        api.destroy?.();
-      };
     })().catch((e) => {
       const msg = e instanceof Error ? e.message : "AlphaTab 초기화 실패";
       setRenderError(msg);
@@ -178,184 +295,226 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
 
     return () => {
       disposed = true;
-      if (apiRef.current?.__cleanup) apiRef.current.__cleanup();
+      apiRef.current?.destroy();
       apiRef.current = null;
     };
-  }, [score]);
+  }, [layout, normalizedScore, zoom]);
 
   const handlePlayPause = () => {
-    if (!apiRef.current) return;
-    if (isPlaying) apiRef.current.player.pause();
-    else apiRef.current.player.play();
+    if (!isPlayerReady) return;
+    apiRef.current?.playPause();
   };
 
-  const titleText = score?.meta.title || songTitle || "빈 악보";
-  const artistText = songArtist || "";
-  const canPlay = Boolean(
-    score?.tracks?.some((tr) => tr.beats.some((b) => Array.isArray(b.notes) && b.notes.length > 0)),
-  );
+  const handleCountIn = () => {
+    const next = !isCountIn;
+    setIsCountIn(next);
+    if (apiRef.current) apiRef.current.countInVolume = next ? 1 : 0;
+  };
+
+  const handleMetronome = () => {
+    const next = !isMetronome;
+    setIsMetronome(next);
+    if (apiRef.current) apiRef.current.metronomeVolume = next ? 1 : 0;
+  };
+
+  const handleLoop = () => {
+    const next = !isLooping;
+    setIsLooping(next);
+    if (apiRef.current) apiRef.current.isLooping = next;
+  };
+
+  const handlePrint = () => {
+    apiRef.current?.print();
+  };
+
+  const handleZoomChange = (value: string) => {
+    setZoom(value);
+    const api = apiRef.current;
+    if (!api) return;
+    api.settings.display.scale = Number.parseInt(value, 10) / 100;
+    api.updateSettings();
+    api.render();
+  };
+
+  const handleLayoutChange = (value: "page" | "horizontal") => {
+    setLayout(value);
+    const api = apiRef.current;
+    const alphaTab = alphaTabModuleRef.current;
+    if (!alphaTab) return;
+    if (!api) return;
+    api.settings.display.layoutMode =
+      value === "horizontal"
+        ? alphaTab.LayoutMode.Horizontal
+        : alphaTab.LayoutMode.Page;
+    api.updateSettings();
+    api.render();
+  };
+
+  const titleText = workingScore.meta.title || songTitle || "빈 악보";
+  const artistText = songArtist || "Unknown Artist / Original";
 
   return (
-    <div className="flex h-full flex-col rounded-xl border border-zinc-200 bg-white shadow-sm">
-      <div className="flex items-center justify-between border-b border-zinc-100 px-4 py-2">
-        <div className="flex flex-col">
-          <span className="text-sm font-semibold text-zinc-900">
-            {score ? "악보" : "빈 악보"}
-          </span>
-          <span className="text-xs text-zinc-500">
-            {score
-              ? `Key: ${score.meta.key} • Capo: ${score.meta.capo} • ♩ = ${score.meta.tempo}`
-              : "Analyze를 누르면 이 페이지 위에 악보가 작성됩니다."}
-          </span>
-        </div>
-        {score && canPlay && (
-          <button
-            onClick={handlePlayPause}
-            className="rounded-full border border-zinc-300 px-4 py-1 text-xs font-medium text-zinc-900 hover:bg-zinc-100"
-          >
-            {isPlaying ? "Pause" : "Play"}
-          </button>
-        )}
-      </div>
-
-      <div className="flex-1 overflow-auto bg-zinc-50 p-6">
-        <div className="mx-auto w-full max-w-[860px] aspect-[210/297] rounded-md border border-zinc-200 bg-white shadow-md">
-          <div className="flex h-full w-full flex-col">
-            {/* 타이틀 영역(빈 악보 포맷 유지) */}
-            <div
-              className="shrink-0"
-              style={{ height: `${(44 / 297) * 100}%` }}
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-white">
+      <div className="relative flex min-h-0 flex-1 overflow-hidden bg-zinc-100">
+        <aside className="z-10 flex h-full min-h-0 w-[19.5rem] shrink-0 flex-col overflow-hidden border-r border-zinc-200 bg-zinc-50">
+          <div className="shrink-0 space-y-2 border-b border-zinc-200 p-3">
+            <label className="block text-xs font-semibold text-zinc-700">유튜브 링크</label>
+            <input
+              value={youtubeUrl}
+              onChange={(e) => onYoutubeUrlChange?.(e.target.value)}
+              placeholder="https://www.youtube.com/watch?v=..."
+              className="w-full rounded-lg border border-zinc-300 px-2.5 py-2 text-xs focus:border-zinc-900 focus:outline-none"
+            />
+            <button
+              type="button"
+              onClick={() => onAnalyze?.()}
+              disabled={isAnalyzing || !youtubeUrl.trim()}
+              className="w-full rounded-lg bg-zinc-900 px-3 py-2 text-xs font-medium text-white disabled:cursor-not-allowed disabled:bg-zinc-400"
             >
-              <svg viewBox="0 0 210 44" className="h-full w-full text-zinc-400">
-                <text
-                  x="105"
-                  y="22"
-                  textAnchor="middle"
-                  fontSize="10"
-                  fill="currentColor"
+              {isAnalyzing ? "불러오는 중..." : "불러오기"}
+            </button>
+            {statusMessage ? (
+              <p className="text-[11px] leading-snug text-zinc-600">{statusMessage}</p>
+            ) : null}
+            {analyzeError ? (
+              <p className="text-[11px] leading-snug text-red-600">{analyzeError}</p>
+            ) : null}
+          </div>
+
+          <div className="flex min-h-0 flex-1 flex-col px-3 pt-3">
+            <p className="mb-2 text-xs font-semibold text-zinc-700">트랙 선택</p>
+            <div ref={trackListRef} className="min-h-0 flex-1 space-y-1 overflow-y-auto" />
+          </div>
+
+          <div className="shrink-0 border-t border-zinc-200 p-3">
+            <div className="rounded-xl border border-zinc-200 bg-white p-3 shadow-sm">
+              <div className="flex flex-col items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handlePlayPause}
+                  disabled={!isPlayerReady}
+                  aria-label={isPlaying ? "일시정지" : "재생"}
+                  title={isPlaying ? "일시정지" : "재생"}
+                  className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full border-2 border-zinc-900 bg-zinc-900 text-white shadow-md transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:border-zinc-300 disabled:bg-zinc-200 disabled:text-zinc-400"
                 >
-                  {titleText}
-                </text>
-                {artistText && (
-                  <text
-                    x="105"
-                    y="34"
-                    textAnchor="middle"
-                    fontSize="6"
-                    fill="currentColor"
-                    opacity="0.85"
-                  >
-                    {artistText}
-                  </text>
-                )}
-                <line
-                  x1="35"
-                  y1="30"
-                  x2="175"
-                  y2="30"
-                  stroke="currentColor"
-                  strokeWidth="0.5"
-                />
-              </svg>
-            </div>
-
-            {/* 하단: 빈 악보 가이드(항상) + 분석 시 alphaTab 렌더 오버레이 */}
-            <div className="relative flex-1 overflow-hidden">
-              <svg viewBox="0 44 210 253" className="h-full w-full text-zinc-400">
-                {/* 시스템(오선+TAB) 여러 줄로 페이지 채우기 */}
-                {Array.from({ length: 5 }).map((_, idx) => {
-                  const top = 44 + idx * 50;
-                  const staffGap = 2.3;
-                  const tabTop = top + 16;
-                  const left = 18;
-                  const right = 192;
-
-                  return (
-                    <g key={`sys-${idx}`}>
-                      {/* 오선보 5줄 */}
-                      {[0, 1, 2, 3, 4].map((i) => (
-                        <line
-                          key={`staff-${idx}-${i}`}
-                          x1={left}
-                          y1={top + i * staffGap}
-                          x2={right}
-                          y2={top + i * staffGap}
-                          stroke="currentColor"
-                          strokeWidth="0.45"
-                        />
-                      ))}
-
-                      {/* 타브 6줄 */}
-                      {[0, 1, 2, 3, 4, 5].map((i) => (
-                        <line
-                          key={`tab-${idx}-${i}`}
-                          x1={left}
-                          y1={tabTop + i * staffGap}
-                          x2={right}
-                          y2={tabTop + i * staffGap}
-                          stroke="currentColor"
-                          strokeWidth="0.45"
-                        />
-                      ))}
-
-                      {/* TAB 레이블 */}
-                      <text x="10" y={tabTop + 3} fontSize="5.2" fill="currentColor">
-                        T
-                      </text>
-                      <text x="10" y={tabTop + 3 + staffGap} fontSize="5.2" fill="currentColor">
-                        A
-                      </text>
-                      <text
-                        x="10"
-                        y={tabTop + 3 + staffGap * 2}
-                        fontSize="5.2"
-                        fill="currentColor"
-                      >
-                        B
-                      </text>
-
-                      {/* 마디 구분선(대충) */}
-                      {[0, 1, 2, 3].map((b) => (
-                        <line
-                          key={`bar-${idx}-${b}`}
-                          x1={left + (right - left) * ((b + 1) / 4)}
-                          y1={top - 1}
-                          x2={left + (right - left) * ((b + 1) / 4)}
-                          y2={tabTop + staffGap * 5 + 1}
-                          stroke="currentColor"
-                          strokeWidth="0.35"
-                          opacity="0.8"
-                        />
-                      ))}
-                    </g>
-                  );
-                })}
-
-                {/* 페이지 하단 가이드 */}
-                <text
-                  x="105"
-                  y="288"
-                  textAnchor="middle"
-                  fontSize="4.5"
-                  fill="currentColor"
-                  opacity="0.9"
-                >
-                  Analyze를 누르면 이 페이지 위에 악보가 렌더링됩니다.
-                </text>
-              </svg>
-
-              {score && (
-                <>
-                  {renderError && (
-                    <div className="absolute left-4 top-4 z-10 rounded-md bg-white/90 px-3 py-2 text-xs text-red-700 shadow-sm">
-                      악보 렌더링 오류: {renderError}
-                    </div>
+                  {isPlaying ? (
+                    <IconPause className="h-6 w-6" />
+                  ) : (
+                    <IconPlay className="h-7 w-7 pl-0.5" />
                   )}
-                  <div ref={alphaTabContainerRef} className="absolute inset-0 h-full w-full" />
-                </>
-              )}
+                </button>
+                <p className="w-full text-center font-mono text-xs tabular-nums text-zinc-600">
+                  {!isPlayerReady ? playerProgress : songPosition}
+                </p>
+                <div className="w-full space-y-0.5 text-center">
+                  <p className="truncate text-sm font-semibold text-zinc-900" title={titleText}>
+                    {titleText}
+                  </p>
+                  <p className="truncate text-xs text-zinc-500" title={artistText}>
+                    {artistText}
+                  </p>
+                </div>
+                <div className="grid w-full grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={handleCountIn}
+                    aria-pressed={isCountIn}
+                    className={`flex flex-col items-center gap-1 rounded-lg border px-2 py-2 text-[10px] font-medium transition ${
+                      isCountIn
+                        ? "border-zinc-900 bg-zinc-100 text-zinc-900"
+                        : "border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100"
+                    }`}
+                  >
+                    <IconHourglass className="h-5 w-5" />
+                    Count-in
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleMetronome}
+                    aria-pressed={isMetronome}
+                    className={`flex flex-col items-center gap-1 rounded-lg border px-2 py-2 text-[10px] font-medium transition ${
+                      isMetronome
+                        ? "border-zinc-900 bg-zinc-100 text-zinc-900"
+                        : "border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100"
+                    }`}
+                  >
+                    <IconMetronome className="h-5 w-5" />
+                    Metronome
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleLoop}
+                    aria-pressed={isLooping}
+                    className={`flex flex-col items-center gap-1 rounded-lg border px-2 py-2 text-[10px] font-medium transition ${
+                      isLooping
+                        ? "border-zinc-900 bg-zinc-100 text-zinc-900"
+                        : "border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100"
+                    }`}
+                  >
+                    <IconLoop className="h-5 w-5" />
+                    Loop
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handlePrint}
+                    className="flex flex-col items-center gap-1 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-2 text-[10px] font-medium text-zinc-700 transition hover:bg-zinc-100"
+                  >
+                    <IconPrint className="h-5 w-5" />
+                    Print
+                  </button>
+                </div>
+                <div className="w-full space-y-2 border-t border-zinc-100 pt-3">
+                  <label className="block text-[10px] font-medium text-zinc-500">줌</label>
+                  <select
+                    value={zoom}
+                    onChange={(e) => handleZoomChange(e.target.value)}
+                    className="h-9 w-full rounded-lg border border-zinc-300 bg-white px-2 text-xs text-zinc-900"
+                  >
+                    <option value="25">25%</option>
+                    <option value="50">50%</option>
+                    <option value="75">75%</option>
+                    <option value="90">90%</option>
+                    <option value="100">100%</option>
+                    <option value="110">110%</option>
+                    <option value="125">125%</option>
+                    <option value="150">150%</option>
+                    <option value="200">200%</option>
+                  </select>
+                  <label className="block text-[10px] font-medium text-zinc-500">레이아웃</label>
+                  <select
+                    value={layout}
+                    onChange={(e) => handleLayoutChange(e.target.value as "page" | "horizontal")}
+                    className="h-9 w-full rounded-lg border border-zinc-300 bg-white px-2 text-xs text-zinc-900"
+                  >
+                    <option value="horizontal">Horizontal</option>
+                    <option value="page">Page</option>
+                  </select>
+                </div>
+              </div>
             </div>
           </div>
+        </aside>
+
+        <div ref={viewportRef} className="relative min-h-0 flex-1 overflow-auto bg-white p-3">
+          <div
+            ref={overlayRef}
+            className="absolute inset-0 z-20 hidden items-start justify-center bg-black/30 backdrop-blur-[1px]"
+          >
+            <div className="mt-4 rounded-md bg-white px-3 py-2 text-xs font-medium text-zinc-700 shadow">
+              Music sheet is loading
+            </div>
+          </div>
+
+          {(modelError || renderError) && (
+            <div className="absolute left-3 top-3 z-30 rounded-md border border-red-200 bg-white px-3 py-2 text-xs text-red-700 shadow-sm">
+              악보 렌더링 오류: {modelError ?? renderError}
+            </div>
+          )}
+          <div className="mx-auto mb-3 mt-1 max-w-[1100px] text-center">
+            <p className="text-4xl font-semibold tracking-tight text-zinc-900">{titleText}</p>
+            <p className="mt-1 text-2xl text-zinc-700">{artistText}</p>
+          </div>
+          <div ref={mainRef} className="mx-auto min-h-full w-full max-w-[1100px]" />
         </div>
       </div>
     </div>
@@ -369,42 +528,38 @@ function buildAlphaTex(score: AlphaTabScore): string {
   const num = ts?.numerator ?? 4;
   const den = ts?.denominator ?? 4;
 
-  // (안정화) AlphaTab 파서 에러를 피하기 위해 body를 "마디(|) 단위"로 고정 길이 beat을 나열한다.
-  // 제목은 UI 타이틀 영역에서만 표시하므로 AlphaTab tex에서는 제외한다.
   const header = [
     `\\tempo ${score.meta.tempo}`,
     `\\ts (${num} ${den})`,
     `\\track "${escapeTex(t.name ?? "Guitar")}"`,
-    "\\staff {tabs}",
+    "\\staff {score tabs}",
     capo > 0 ? `\\capo ${capo}` : "",
     "",
   ]
     .filter(Boolean)
     .join(" ");
 
-  // beats -> notes를 beat 단위로 순서대로 나열한다.
-  // - no note: rest 'r'
-  // - 1 note: fret.string
-  // - multi note: (fret.string fret.string ...)
   const beatTokens: string[] = [];
   for (const b of t.beats) {
-    const chordText = b.chord?.trim() || null;
-    const lyricText = b.lyric?.trim() || null;
-    const beatText = chordText && lyricText ? `${chordText} ${lyricText}` : chordText || lyricText;
+    const lyricText = sanitizeBeatText(b.lyric);
+    const chordText = sanitizeBeatText(b.chord);
+    const composed = lyricText && chordText ? `${lyricText} ${chordText}` : lyricText ?? chordText;
+    const beatText = sanitizeBeatText(composed);
+    const playableNotes = (b.notes ?? []).filter((n) => Number(n.fret) >= 0);
 
-    if (!b.notes || b.notes.length === 0) {
-      if (beatText) beatTokens.push(`0.1{hide txt "${escapeTex(beatText)}"}`);
+    if (playableNotes.length === 0) {
+      if (beatText) beatTokens.push(`r{txt "${escapeTex(beatText)}"}`);
       else beatTokens.push("r");
       continue;
     }
-    if (b.notes.length === 1) {
-      const n = b.notes[0];
+    if (playableNotes.length === 1) {
+      const n = playableNotes[0];
       const token = `${n.fret}.${n.string}`;
       if (beatText) beatTokens.push(`${token}{txt "${escapeTex(beatText)}"}`);
       else beatTokens.push(token);
       continue;
     }
-    const tokens = b.notes.map((n) => `${n.fret}.${n.string}`);
+    const tokens = playableNotes.map((n) => `${n.fret}.${n.string}`);
     if (beatText) tokens[0] = `${tokens[0]}{txt "${escapeTex(beatText)}"}`;
     beatTokens.push(`(${tokens.join(" ")})`);
   }
@@ -418,11 +573,16 @@ function buildAlphaTex(score: AlphaTabScore): string {
     const start = barIdx * beatsPerBar;
     const end = start + beatsPerBar;
     const barTokens = beatTokens.slice(start, end);
-    while (barTokens.length < beatsPerBar) barTokens.push("r"); // 마지막 마디 길이 고정
+    while (barTokens.length < beatsPerBar) barTokens.push("r");
     barStrings.push(`:${durationDen} ${barTokens.join(" ")} |`);
   }
 
-  const body = barStrings.join(" ").replace(/\s+/g, " ").trim();
+  const barsPerRow = 4;
+  const groupedRows: string[] = [];
+  for (let i = 0; i < barStrings.length; i += barsPerRow) {
+    groupedRows.push(barStrings.slice(i, i + barsPerRow).join(" "));
+  }
+  const body = groupedRows.join("\n").replace(/[ \t]+/g, " ").trim();
   return `${header} ${body}`.trim();
 }
 
@@ -430,39 +590,49 @@ function escapeTex(input: string): string {
   return input.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 }
 
+function sanitizeBeatText(input: string | null | undefined): string | null {
+  if (!input) return null;
+  const cleaned = input
+    .replace(/[\r\n\t]/g, " ")
+    .replace(/[{}|]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return null;
+  return cleaned.slice(0, 24);
+}
+
 function normalizeScoreForRendering(score: AlphaTabScore): AlphaTabScore | null {
   if (!score?.meta || !Array.isArray(score.tracks) || score.tracks.length === 0) return null;
   const track0 = score.tracks[0];
   if (!track0 || !Array.isArray(track0.beats)) return null;
 
-  const beats = track0.beats
-    .map((b) => {
-      const notes = Array.isArray(b?.notes)
-        ? b.notes
-            .map((n) => {
-              const string = Number(n?.string);
-              const fret = Number(n?.fret);
-              const start = Number(n?.start ?? 0);
-              const end = Number(n?.end ?? start + 0.25);
-              if (!Number.isFinite(string) || !Number.isFinite(fret)) return null;
-              return {
-                string: Math.max(1, Math.min(6, Math.round(string))),
-                fret: Math.max(0, Math.min(24, Math.round(fret))),
-                start: Number.isFinite(start) ? start : 0,
-                end: Number.isFinite(end) ? end : 0.25,
-              };
-            })
-            .filter((n): n is AlphaTabNote => n !== null)
-        : [];
+  const beats = track0.beats.map((b) => {
+    const notes = Array.isArray(b?.notes)
+      ? b.notes
+          .map((n) => {
+            const string = Number(n?.string);
+            const fret = Number(n?.fret);
+            const start = Number(n?.start ?? 0);
+            const end = Number(n?.end ?? start + 0.25);
+            if (!Number.isFinite(string) || !Number.isFinite(fret)) return null;
+            if (fret < 0) return null;
+            return {
+              string: Math.max(1, Math.min(6, Math.round(string))),
+              fret: Math.max(0, Math.min(24, Math.round(fret))),
+              start: Number.isFinite(start) ? start : 0,
+              end: Number.isFinite(end) ? end : 0.25,
+            };
+          })
+          .filter((n): n is AlphaTabNote => n !== null)
+      : [];
 
-      return {
-        time: Number.isFinite(Number(b?.time)) ? Number(b?.time) : 0,
-        chord: b?.chord ?? null,
-        lyric: b?.lyric ?? null,
-        notes,
-      } satisfies AlphaTabBeat;
-    })
-    ;
+    return {
+      time: Number.isFinite(Number(b?.time)) ? Number(b?.time) : 0,
+      chord: b?.chord ?? null,
+      lyric: b?.lyric ?? null,
+      notes,
+    } satisfies AlphaTabBeat;
+  });
 
   if (beats.length === 0) {
     beats.push({
@@ -503,31 +673,45 @@ function normalizeScoreForRendering(score: AlphaTabScore): AlphaTabScore | null 
   };
 }
 
-let alphatabUmdPromise: Promise<void> | null = null;
-function loadAlphaTabUmd(): Promise<void> {
-  if (typeof window === "undefined") return Promise.resolve();
-  const alphaTabMaybe = (window as unknown as { alphaTab?: AlphaTabUmd }).alphaTab;
-  if (alphaTabMaybe) return Promise.resolve();
-  if (alphatabUmdPromise) return alphatabUmdPromise;
+let alphaTabLoadPromise: Promise<AlphaTabModuleLike> | null = null;
 
-  alphatabUmdPromise = new Promise((resolve, reject) => {
-    const id = "alphatab-umd";
-    const existing = document.getElementById(id) as HTMLScriptElement | null;
+function loadAlphaTabUmd(): Promise<AlphaTabModuleLike> {
+  if (typeof window === "undefined") {
+    return Promise.reject(new Error("브라우저 환경에서만 alphaTab을 로드할 수 있습니다."));
+  }
+
+  const maybeLoaded = (window as unknown as { alphaTab?: AlphaTabModuleLike }).alphaTab;
+  if (maybeLoaded) return Promise.resolve(maybeLoaded);
+  if (alphaTabLoadPromise) return alphaTabLoadPromise;
+
+  alphaTabLoadPromise = new Promise<AlphaTabModuleLike>((resolve, reject) => {
+    const existing = document.getElementById("alphatab-cdn-script") as HTMLScriptElement | null;
     if (existing) {
-      existing.addEventListener("load", () => resolve());
-      existing.addEventListener("error", () => reject(new Error("alphaTab UMD load error")));
+      existing.addEventListener("load", () => {
+        const loaded = (window as unknown as { alphaTab?: AlphaTabModuleLike }).alphaTab;
+        if (loaded) resolve(loaded);
+        else reject(new Error("alphaTab 스크립트는 로드되었지만 전역 객체가 없습니다."));
+      });
+      existing.addEventListener("error", () => {
+        reject(new Error("alphaTab 스크립트 로드에 실패했습니다."));
+      });
       return;
     }
 
     const script = document.createElement("script");
-    script.id = id;
+    script.id = "alphatab-cdn-script";
     script.async = true;
-    script.src = "https://unpkg.com/@coderline/alphatab@1.8.1/dist/alphaTab.min.js";
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error("alphaTab UMD load error"));
+    script.src = "https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/alphaTab.js";
+    script.onload = () => {
+      const loaded = (window as unknown as { alphaTab?: AlphaTabModuleLike }).alphaTab;
+      if (loaded) resolve(loaded);
+      else reject(new Error("alphaTab 스크립트는 로드되었지만 전역 객체가 없습니다."));
+    };
+    script.onerror = () => {
+      reject(new Error("alphaTab 스크립트 로드에 실패했습니다."));
+    };
     document.head.appendChild(script);
   });
 
-  return alphatabUmdPromise;
+  return alphaTabLoadPromise;
 }
-

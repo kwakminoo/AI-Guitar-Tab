@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
+import os
+import platform
 
 
 def extract_guitar_stem(input_audio: Path, output_dir: Path) -> Path:
@@ -10,6 +12,12 @@ def extract_guitar_stem(input_audio: Path, output_dir: Path) -> Path:
     - demucs 패키지가 설치되어 있고, 가상환경의 스크립트 경로에서 찾을 수 있어야 한다.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Windows + 특정 torch/torchcodec 조합에서는 demucs 저장 단계가 실패할 수 있다.
+    # 기본값은 안전 경로(원본 사용)이며, 필요 시 AI_GUITAR_ENABLE_DEMUCS=1 로 강제 실행 가능.
+    enable_demucs = os.getenv("AI_GUITAR_ENABLE_DEMUCS", "").strip() == "1"
+    if platform.system().lower().startswith("win") and not enable_demucs:
+        return input_audio
 
     # htdemucs_6s 모델은 기타 스템을 포함한 6개 소스를 분리한다.
     # demucs -n htdemucs_6s -o <output_dir> <input_audio>

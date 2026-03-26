@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import List
 
@@ -61,6 +63,51 @@ def transcribe_guitar_to_notes(audio_path: Path) -> List[NoteEvent]:
 
     notes: List[NoteEvent] = []
 
+    def _get_local_basic_pitch_model_path() -> Path | None:
+        """
+        프로젝트 내부에 내려받은 ONNX 모델을 사용한다.
+
+        - 기본 경로: `backend/app/models/basic_pitch/saved_models/icassp_2022/nmp.onnx`
+        - override: `AI_GUITAR_BASIC_PITCH_MODEL_PATH` 환경변수로 경로 지정 가능
+        """
+        override = os.getenv("AI_GUITAR_BASIC_PITCH_MODEL_PATH", "").strip()
+        if override:
+            p = Path(override)
+            return p if p.exists() else None
+
+        local_path = (
+            Path(__file__).resolve().parents[1]
+            / "models"
+            / "basic_pitch"
+            / "saved_models"
+            / "icassp_2022"
+            / "nmp.onnx"
+        )
+
+        if local_path.exists() and local_path.stat().st_size > 0:
+            return local_path
+
+        auto_download = os.getenv("AI_GUITAR_BASIC_PITCH_AUTO_DOWNLOAD", "1").strip() != "0"
+        if not auto_download:
+            return None
+
+        # 서버 부팅/요청 중에도 동작하도록 “best effort”로만 다운로드를 시도한다.
+        try:
+            repo_backend_root = Path(__file__).resolve().parents[2]
+            download_script = repo_backend_root / "scripts" / "download_basic_pitch_model.py"
+            if download_script.exists():
+                subprocess.run(
+                    [sys.executable, str(download_script)],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=600,
+                )
+        except Exception:
+            pass
+
+        return local_path if local_path.exists() and local_path.stat().st_size > 0 else None
+
     # 1) Basic Pitch (가능하면)로 전사
     # - Windows에서는 onnxruntime/tensorflow DLL 문제로 import 단계에서 실패할 수 있어
     #   서버 부팅이 깨지지 않도록 함수 내부에서 lazy import + fallback 처리한다.
@@ -74,12 +121,13 @@ def transcribe_guitar_to_notes(audio_path: Path) -> List[NoteEvent]:
         finally:
             logging.disable(previous_disable)
 
-        _model_output, _midi_data, note_events = predict(
-            audio_path,
-            model_or_model_path=None,
-            save_midi=False,
-            sonify_midi=False,
-        )
+            local_model_path = _get_local_basic_pitch_model_path()
+            predict_kwargs = {
+            }
+            if local_model_path is not None:
+                predict_kwargs["model_or_model_path"] = str(local_model_path)
+
+            _model_output, _midi_data, note_events = predict(audio_path, **predict_kwargs)
 
         for start, end, midi, _amp in note_events:
             if end - start < 0.05:

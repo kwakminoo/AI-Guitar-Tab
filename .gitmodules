@@ -1,0 +1,3 @@
+[submodule "vendor/alphaTab"]
+	path = vendor/alphaTab
+	url = https://github.com/CoderLine/alphaTab.git

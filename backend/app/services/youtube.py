@@ -50,6 +50,9 @@ def download_audio_from_youtube(
         ],
     }
 
+    # max_seconds이 주어지면, 다운로드 후 ffmpeg로 앞부분만 잘라 사용한다.
+    # (yt-dlp의 download_ranges는 환경/포맷에 따라 동작이 불안정할 수 있어 기본은 보수적으로 유지)
+
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         # postprocessor가 만든 최종 파일 이름을 구성

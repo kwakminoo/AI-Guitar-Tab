@@ -1,31 +1,30 @@
-from pathlib import Path
 import asyncio
 import hashlib
-import json
 import math
+from pathlib import Path
+from typing import Dict, List
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, HttpUrl
-from typing import List
 
+from .services.alphatab_mapper import beats_to_alphatab_score
+from .services.harmony import analyze_harmony
+from .services.lyrics import map_lyrics_to_beats
+from .services.musicxml import build_musicxml_from_beats, parse_musicxml_to_notes_by_beat
+from .services.rhythm import estimate_tempo_and_meter
+from .services.separate import extract_guitar_stem
+from .services.transcribe import NoteEvent, transcribe_guitar_to_notes
+from .services.technique import estimate_strum_direction_by_beat
+from .services.song_meta import resolve_song_metadata_from_video
 from .services.youtube import (
     download_audio_from_youtube,
     fetch_youtube_basic_meta,
-    infer_song_meta_from_video_title,
 )
-from .services.separate import extract_guitar_stem
-from .services.transcribe import transcribe_guitar_to_notes, NoteEvent
-from .services.alphatab_mapper import beats_to_alphatab_score, notes_to_alphatab_score
-from .services.harmony import analyze_harmony
-from .services.rhythm import estimate_tempo_and_meter
-from .services.lyrics import map_lyrics_to_beats
-
 
 app = FastAPI(title="AI Guitar Tab Backend")
 
-# Next.js dev 서버(로컬)에서 호출할 수 있도록 CORS 허용
+# 직접 백엔드(8000)에 붙는 클라이언트·도구용 (프론트는 Next 리라이트로 동일 출처 권장)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -38,11 +37,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-class TimeSignature(BaseModel):
-    numerator: int
-    denominator: int
 
 
 class AlphaTabNote(BaseModel):
@@ -86,6 +80,16 @@ class SongMetaResponse(BaseModel):
     capo: int = 0
 
 
+class YoutubeTabPreviewResponse(BaseModel):
+    """유튜브 URL → 메타·가사 + 오디오 분석으로 타브 점수."""
+
+    title: str
+    artist: str
+    lyrics: str | None = None
+    musicxml: str | None = None
+    score: AlphaTabScore
+
+
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
@@ -100,11 +104,10 @@ async def song_meta_from_youtube(payload: FromYoutubeRequest) -> SongMetaRespons
     try:
         meta = await asyncio.to_thread(fetch_youtube_basic_meta, url)
         inferred = await asyncio.to_thread(
-            infer_song_meta_from_video_title,
+            resolve_song_metadata_from_video,
             meta.get("video_title") or meta.get("title") or "",
             fallback_artist=meta.get("artist"),
         )
-        # 메타 단계는 가볍게 가져오고, 코드/카포는 분석 단계에서 계산해 반영한다.
         chords = ["C", "G", "Am", "F"]
         return SongMetaResponse(
             title=inferred.get("title") or "Unknown Title",
@@ -118,54 +121,150 @@ async def song_meta_from_youtube(payload: FromYoutubeRequest) -> SongMetaRespons
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/score/from-youtube", response_model=AlphaTabScore)
-async def score_from_youtube(payload: FromYoutubeRequest) -> AlphaTabScore:
+def _run_youtube_tab_analysis(url: str) -> dict:
     """
-    유튜브 링크를 받아 기타 타브용 AlphaTabScore를 반환하는 엔드포인트.
-    현재는 파이프라인이 완성되기 전까지 프론트의 데모와 동일한
-    간단한 스코어를 반환한다.
+    유튜브에서 짧은 구간 오디오를 받아 리듬 추정 → 기타 전사 → 하모니 → AlphaTabScore.
+    """
+    target_seconds = 30.0
+    job_hash = hashlib.md5(url.encode("utf-8")).hexdigest()[:12]
+    work_dir = Path("data") / "jobs" / job_hash
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    meta = fetch_youtube_basic_meta(url)
+    inferred = resolve_song_metadata_from_video(
+        meta.get("video_title") or meta.get("title") or "",
+        fallback_artist=meta.get("artist"),
+    )
+    title = str(inferred.get("title") or "Unknown Title")
+    artist = str(inferred.get("artist") or "Unknown Artist")
+    lyrics = inferred.get("lyrics")
+
+    audio_path = download_audio_from_youtube(
+        url,
+        work_dir / "audio",
+        "wav",
+        int(target_seconds),
+    )
+
+    tempo, time_sig_num, beat_times = estimate_tempo_and_meter(
+        str(audio_path),
+        target_seconds=target_seconds,
+    )
+
+    lyrics_by_beat = map_lyrics_to_beats(lyrics, beat_times)
+
+    guitar_stem = extract_guitar_stem(Path(audio_path), work_dir / "stems")
+    notes = transcribe_guitar_to_notes(guitar_stem)
+
+    notes_by_beat: Dict[int, List[NoteEvent]] = {}
+    for ev in notes:
+        mid = (float(ev.start) + float(ev.end)) / 2.0
+        if not beat_times:
+            continue
+        if mid < beat_times[0] or mid > beat_times[-1]:
+            continue
+        lo, hi = 0, len(beat_times) - 1
+        while lo < hi:
+            mid_i = (lo + hi) // 2
+            if beat_times[mid_i] < mid:
+                lo = mid_i + 1
+            else:
+                hi = mid_i
+        idx2 = lo
+        idx1 = max(0, idx2 - 1)
+        beat_idx = idx1 if abs(beat_times[idx1] - mid) <= abs(beat_times[idx2] - mid) else idx2
+        notes_by_beat.setdefault(beat_idx, []).append(ev)
+
+    technique_by_beat = estimate_strum_direction_by_beat(
+        notes_by_beat,
+        beat_count=len(beat_times),
+    )
+
+    beats_per_bar = max(1, int(time_sig_num))
+    total_bars = int(math.ceil(max(1, len(beat_times)) / beats_per_bar))
+
+    start_t = float(beat_times[0]) if beat_times else 0.0
+    rel_notes: List[NoteEvent] = []
+    for ev in notes:
+        rs = float(ev.start) - start_t
+        re = float(ev.end) - start_t
+        if re <= 0:
+            continue
+        if rs >= target_seconds:
+            continue
+        rel_notes.append(NoteEvent(string=ev.string, fret=ev.fret, start=rs, end=re))
+
+    harmony = analyze_harmony(
+        rel_notes,
+        tempo,
+        time_signature_numerator=time_sig_num,
+        max_bars=total_bars,
+    )
+
+    chords = harmony.chords
+    chord_by_beat: List[str | None] = [None for _ in beat_times]
+    for bar_idx in range(min(total_bars, len(chords))):
+        bar_start_beat = bar_idx * beats_per_bar
+        if 0 <= bar_start_beat < len(beat_times):
+            chord_by_beat[bar_start_beat] = chords[bar_idx]
+
+    musicxml = build_musicxml_from_beats(
+        beat_times,
+        notes_by_beat,
+        title=title,
+        artist=artist,
+        tempo=tempo,
+        time_signature_numerator=time_sig_num,
+    )
+    musicxml_path = work_dir / "musicxml" / "preview.musicxml"
+    musicxml_path.parent.mkdir(parents=True, exist_ok=True)
+    musicxml_path.write_text(musicxml, encoding="utf-8")
+
+    parsed_xml = parse_musicxml_to_notes_by_beat(musicxml)
+
+    score_dict = beats_to_alphatab_score(
+        beat_times,
+        title=title,
+        tempo=parsed_xml.tempo,
+        time_signature_numerator=time_sig_num,
+        key=harmony.key,
+        capo=harmony.capo,
+        chords=chords,
+        notes_by_beat=parsed_xml.notes_by_beat,
+        lyrics_by_beat=lyrics_by_beat,
+        chord_by_beat=chord_by_beat,
+        technique_by_beat=technique_by_beat,
+    )
+    return {
+        "title": title,
+        "artist": artist,
+        "lyrics": lyrics,
+        "musicxml": musicxml,
+        "score": score_dict,
+    }
+
+
+@app.post("/api/youtube/tab-preview", response_model=YoutubeTabPreviewResponse)
+async def youtube_tab_preview(payload: FromYoutubeRequest) -> YoutubeTabPreviewResponse:
+    """
+    유튜브 영상 링크 → (곡명·가수·가사 LRCLIB) + 앞부분 오디오 분석으로 타브 악보 JSON 생성.
     """
     url = str(payload.url)
     if "youtube.com" not in url and "youtu.be" not in url:
         raise HTTPException(status_code=400, detail="지원하지 않는 URL 형식입니다.")
 
-    def run_pipeline() -> dict:
-        work_dir = Path("data") / "jobs"
-        work_dir.mkdir(parents=True, exist_ok=True)
-
-        # 1) YouTube 오디오 다운로드
-        audio_path = download_audio_from_youtube(
-            str(payload.url),
-            work_dir,
-            audio_format="wav",
-            max_seconds=30,
-        )
-
-        # 2) Demucs로 기타 스템 추출
-        guitar_stem = extract_guitar_stem(audio_path, work_dir / "stems")
-
-        # 3) 기타 전사
-        notes = transcribe_guitar_to_notes(guitar_stem)
-
-        # 3.5) 하모니 추정(키/카포/코드)
-        harmony = analyze_harmony(notes, tempo=90)
-
-        # 4) AlphaTabScore JSON으로 매핑
-        score_dict = notes_to_alphatab_score(
-            notes,
-            title=fetch_youtube_basic_meta(str(payload.url)).get("title", "From YouTube"),
-            tempo=90,
-            key=harmony.key,
-            capo=harmony.capo,
-            chords=harmony.chords,
-        )
-        return score_dict
-
     try:
-        # 무한 대기로 보이는 상황을 피하기 위해 전체 파이프라인 시간 제한을 둔다.
-        # (다운로드 + 스템분리 + 전사 + 매핑)
-        score_dict = await asyncio.wait_for(asyncio.to_thread(run_pipeline), timeout=420)
-        return AlphaTabScore(**score_dict)
+        result = await asyncio.wait_for(
+            asyncio.to_thread(_run_youtube_tab_analysis, url),
+            timeout=420.0,
+        )
+        return YoutubeTabPreviewResponse(
+            title=result["title"],
+            artist=result["artist"],
+            lyrics=result["lyrics"],
+            musicxml=result.get("musicxml"),
+            score=AlphaTabScore(**result["score"]),
+        )
     except TimeoutError:
         raise HTTPException(
             status_code=504,
@@ -173,221 +272,3 @@ async def score_from_youtube(payload: FromYoutubeRequest) -> AlphaTabScore:
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/score/from-youtube/stream")
-async def score_from_youtube_stream(url: HttpUrl) -> StreamingResponse:
-    """
-    30초 구간에 대해 단계별 score를 스트리밍한다.
-    - stage=grid: tempo/timeSignature + (있다면) syncedLyrics 기반 lyric 매핑, notes는 rests
-    - stage=notes: 전사된 notes를 beat grid에 매핑
-    - stage=harmony: bar 단위 chord 텍스트를 beat에 주입 + key/capo 확정
-    """
-
-    target_seconds = 30.0
-    url_str = str(url)
-    if "youtube.com" not in url_str and "youtu.be" not in url_str:
-        raise HTTPException(status_code=400, detail="지원하지 않는 URL 형식입니다.")
-
-    job_hash = hashlib.md5(url_str.encode("utf-8")).hexdigest()[:12]
-
-    async def event_gen():
-        work_dir = Path("data") / "jobs" / job_hash
-        work_dir.mkdir(parents=True, exist_ok=True)
-
-        def send_event(event: str, payload: dict) -> str:
-            return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-        try:
-            # 1) 메타/가사 먼저
-            meta = await asyncio.to_thread(fetch_youtube_basic_meta, url_str)
-            inferred = await asyncio.to_thread(
-                infer_song_meta_from_video_title,
-                meta.get("video_title") or meta.get("title") or "",
-                fallback_artist=meta.get("artist"),
-            )
-            title = str(inferred.get("title") or "From YouTube")
-            artist = str(inferred.get("artist") or "Unknown Artist")
-            lyrics = inferred.get("lyrics")
-
-            # 2) 오디오 다운로드(30초)
-            audio_path = await asyncio.to_thread(
-                download_audio_from_youtube,
-                url_str,
-                work_dir / "audio",
-                "wav",
-                int(target_seconds),
-            )
-
-            # 3) BPM/메터 추정 + beat grid 생성
-            tempo, time_signature_numerator, beat_times = await asyncio.to_thread(
-                estimate_tempo_and_meter,
-                str(audio_path),
-                target_seconds=target_seconds,
-            )
-
-            # 4) lyric -> beat 매핑(타임코드 유무 자동 처리)
-            lyrics_by_beat = map_lyrics_to_beats(lyrics, beat_times)
-
-            # stage=grid: notes는 비워둔 rests 스코어
-            empty_notes_by_beat: dict[int, List[NoteEvent]] = {}
-            score_grid = beats_to_alphatab_score(
-                beat_times,
-                title=title,
-                tempo=tempo,
-                time_signature_numerator=time_signature_numerator,
-                key="C major",
-                capo=0,
-                chords=[],
-                notes_by_beat=empty_notes_by_beat,
-                lyrics_by_beat=lyrics_by_beat,
-                chord_by_beat=[None for _ in beat_times],
-            )
-            yield send_event(
-                "message",
-                {
-                    "stage": "grid",
-                    "progress": 20,
-                    "title": title,
-                    "artist": artist,
-                    "lyrics": lyrics,
-                    "score": score_grid,
-                },
-            )
-
-            # 5) 기타 stem 추출
-            guitar_stem = await asyncio.to_thread(
-                extract_guitar_stem,
-                Path(audio_path),
-                work_dir / "stems",
-            )
-
-            # 6) 전사(notes)
-            notes = await asyncio.to_thread(transcribe_guitar_to_notes, guitar_stem)
-
-            # 7) notes -> beat 매핑(가장 가까운 beat에 배치)
-            notes_by_beat: dict[int, List[NoteEvent]] = {}
-            for ev in notes:
-                mid = (float(ev.start) + float(ev.end)) / 2.0
-                # nearest beat
-                if not beat_times:
-                    continue
-                if mid < beat_times[0] or mid > beat_times[-1]:
-                    continue
-
-                # 이진 탐색으로 nearest
-                lo, hi = 0, len(beat_times) - 1
-                while lo < hi:
-                    mid_i = (lo + hi) // 2
-                    if beat_times[mid_i] < mid:
-                        lo = mid_i + 1
-                    else:
-                        hi = mid_i
-                idx2 = lo
-                idx1 = max(0, idx2 - 1)
-                beat_idx = idx1 if abs(beat_times[idx1] - mid) <= abs(beat_times[idx2] - mid) else idx2
-                notes_by_beat.setdefault(beat_idx, []).append(ev)
-
-            score_notes = beats_to_alphatab_score(
-                beat_times,
-                title=title,
-                tempo=tempo,
-                time_signature_numerator=time_signature_numerator,
-                key="C major",
-                capo=0,
-                chords=[],
-                notes_by_beat=notes_by_beat,
-                lyrics_by_beat=lyrics_by_beat,
-                chord_by_beat=[None for _ in beat_times],
-            )
-            yield send_event(
-                "message",
-                {
-                    "stage": "notes",
-                    "progress": 65,
-                    "title": title,
-                    "artist": artist,
-                    "lyrics": lyrics,
-                    "score": score_notes,
-                },
-            )
-
-            # 8) harmony(키/카포/코드) 추정
-            beats_per_bar = max(1, int(time_signature_numerator))
-            total_bars = int(math.ceil(max(1, len(beat_times)) / beats_per_bar))
-
-            # bar start 기준 정렬(beat_times[0]를 0초로 가정)
-            start_t = float(beat_times[0]) if beat_times else 0.0
-            rel_notes: List[NoteEvent] = []
-            for ev in notes:
-                rs = float(ev.start) - start_t
-                re = float(ev.end) - start_t
-                if re <= 0:
-                    continue
-                if rs >= target_seconds:
-                    continue
-                rel_notes.append(NoteEvent(string=ev.string, fret=ev.fret, start=rs, end=re))
-
-            harmony = await asyncio.to_thread(
-                analyze_harmony,
-                rel_notes,
-                tempo,
-                time_signature_numerator=time_signature_numerator,
-                max_bars=total_bars,
-            )
-
-            # stage=harmony: bar start에 chord 텍스트를 beat에 주입
-            chords = harmony.chords
-            chord_by_beat: List[str | None] = [None for _ in beat_times]
-            for bar_idx in range(min(total_bars, len(chords))):
-                bar_start_beat = bar_idx * beats_per_bar
-                if 0 <= bar_start_beat < len(beat_times):
-                    chord_by_beat[bar_start_beat] = chords[bar_idx]
-
-            score_harmony = beats_to_alphatab_score(
-                beat_times,
-                title=title,
-                tempo=tempo,
-                time_signature_numerator=time_signature_numerator,
-                key=harmony.key,
-                capo=harmony.capo,
-                chords=chords,
-                notes_by_beat=notes_by_beat,
-                lyrics_by_beat=lyrics_by_beat,
-                chord_by_beat=chord_by_beat,
-            )
-            yield send_event(
-                "message",
-                {
-                    "stage": "harmony",
-                    "progress": 95,
-                    "title": title,
-                    "artist": artist,
-                    "lyrics": lyrics,
-                    "score": score_harmony,
-                },
-            )
-
-            yield send_event(
-                "message",
-                {
-                    "stage": "done",
-                    "progress": 100,
-                    "title": title,
-                    "artist": artist,
-                    "lyrics": lyrics,
-                    "score": score_harmony,
-                },
-            )
-        except Exception as e:
-            yield send_event(
-                "message",
-                {
-                    "stage": "error",
-                    "progress": 0,
-                    "detail": str(e),
-                },
-            )
-
-    return StreamingResponse(event_gen(), media_type="text/event-stream")
-

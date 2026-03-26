@@ -82,7 +82,12 @@ def estimate_tempo_and_meter(
     end_t = start_t + float(target_seconds)
     trimmed = [t for t in trimmed if t <= end_t]
 
-    tempo_int = int(max(30, min(220, round(float(tempo) if tempo else 90))))
+    # librosa 버전에 따라 tempo가 scalar가 아니라 ndarray([tempo])로 올 수 있다.
+    if isinstance(tempo, np.ndarray):
+        tempo_value = float(tempo.reshape(-1)[0]) if tempo.size > 0 else 90.0
+    else:
+        tempo_value = float(tempo) if tempo else 90.0
+    tempo_int = int(max(30, min(220, round(tempo_value))))
     if len(trimmed) < best_n:
         # beat_track이 너무 적게 잡혔으면 평균 beat_period로 보강
         beat_period = 60.0 / max(1, tempo_int)
