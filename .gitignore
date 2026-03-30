@@ -11,6 +11,7 @@ dist/
 
 # Virtualenv
 .venv/
+backend/.venv311/
 venv/
 ENV/
 env/
@@ -31,3 +32,6 @@ Thumbs.db
 # Downloaded audio artifacts
 /data/
 backend/data/
+
+# Fret-T5 upstream clone (재현: backend/scripts/ensure_fret_t5_vendor.ps1)
+backend/vendor/

@@ -1,0 +1,18 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+yt-dlp>=2024.4.9
+demucs==4.0.1
+torchcodec>=0.10.0
+soundfile>=0.12.1
+numpy>=1.26.0
+pydantic==2.9.0
+python-multipart>=0.0.9
+librosa>=0.10.2
+musicpy>=7.11
+basic-pitch[onnx]>=0.4.0
+onnxruntime>=1.17.0
+# Fret-T5: run_backend_py311.ps1 가 scripts/ensure_fret_t5_vendor.ps1 로 vendor 클론 후 pip install -e 처리
+#   (수동: backend/requirements-fret-t5.txt 설명 참고)
+# madmom은 Windows + Python 3.11에서 빌드 실패 가능성이 높아 선택 설치로 분리.
+# 가능 환경에서만 수동 설치:
+#   .venv311/Scripts/python.exe -m pip install madmom==0.16.1 --no-build-isolation

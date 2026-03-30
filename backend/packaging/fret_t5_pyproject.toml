@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fret-t5"
+version = "0.1.0"
+description = "Transformer-based model for converting MIDI to guitar tablature"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "torch",
+    "transformers",
+    "peft",
+    "numpy",
+    "tqdm",
+    "pretty_midi",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest",
+]

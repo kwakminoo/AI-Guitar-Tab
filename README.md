@@ -4,6 +4,43 @@
 
 ---
 
+백엔드 실행법
+매번 할 일 (PC 켠 뒤 · 웹 테스트용)
+1) PowerShell 연다
+시작 메뉴에서 PowerShell 또는 터미널 실행.
+
+2) 프로젝트 폴더로 이동
+cd "C:\Users\kwakm\OneDrive\Desktop\Cusor-Project\AI-Guitar-Tab-main"
+(프로젝트를 다른 드라이브/폴더에 두었다면 그 경로로 바꿉니다.)
+
+3) (해당 창에서 처음일 때만) 실행 정책
+스크립트가 막히면 그 PowerShell 창에서만 한 번:
+
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+4) 백엔드 서버 실행
+.\run_backend_py311.ps1
+이 창은 닫지 말고 유지합니다.
+정상이면 http://127.0.0.1:8000 에 서버가 뜹니다.
+확인: 브라우저에서 http://127.0.0.1:8000/health
+5) (웹 프론트까지 쓸 때) 새 PowerShell 창 하나 더 연다
+첫 번째 창은 백엔드용으로 그대로 둡니다.
+
+6) 두 번째 창에서 프론트 폴더로 이동 후 개발 서버 실행
+cd "C:\Users\kwakm\OneDrive\Desktop\Cusor-Project\AI-Guitar-Tab-main\frontend"
+npm run dev
+이 창도 닫지 말고 유지합니다.
+브라우저: http://localhost:3000
+7) 끝낼 때
+각 창에서 Ctrl + C 로 서버를 종료합니다.
+
+(선택) Fret-T5 추론까지 쓸 때만
+체크포인트·토크나이저 환경 변수는 재부팅 후 사라집니다. 그날 그날 백엔드를 켜기 직전, 백엔드를 띄우는 같은 PowerShell 창에서 예를 들어:
+
+
+$env:AI_GUITAR_FRET_T5_CHECKPOINT = "C:\경로\best_model.pt"
+$env:AI_GUITAR_FRET_T5_HOME = "C:\Users\kwakm\OneDrive\Desktop\Cusor-Project\AI-Guitar-Tab-main\backend\vendor\t5_fretting_transformer"
+.\run_backend_py311.ps1
+
 ## 1. 문제 정의서
 
 ### 해결할 문제

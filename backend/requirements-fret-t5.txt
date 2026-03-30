@@ -1,0 +1,6 @@
+# Fret-T5 (Fretting-Transformer 논문 기반, Jazvie/t5_fretting_transformer)
+# upstream pyproject에 version이 없어 pip git+ 직접 설치가 실패할 수 있습니다.
+# 이 프로젝트는 backend/scripts/ensure_fret_t5_vendor.ps1 로 클론 후 packaging/fret_t5_pyproject.toml 을 덮어씌운 뒤:
+#   pip install -e backend/vendor/t5_fretting_transformer
+# run_backend_py311.ps1 실행 시 위 과정이 자동으로 시도됩니다.
+# 추론을 쓰려면 학습 체크포인트(.pt)와 universal_tokenizer 경로를 환경변수로 지정하세요.

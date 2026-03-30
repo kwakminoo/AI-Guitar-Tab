@@ -1,14 +1,9 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
-# yt-dlp는 배포 버전이 자주 바뀌므로, 호환 가능한 최신 안정 버전을 사용
+pydantic==2.9.0
+
 yt-dlp>=2024.4.9
 demucs==4.0.1
-torchcodec>=0.10.0
-soundfile>=0.12.1
-numpy>=1.26.0
-pydantic==2.9.0
-python-multipart>=0.0.9
-basic-pitch[onnx]>=0.4.0
-onnxruntime>=1.17.0
-librosa>=0.10.2
+basic-pitch>=0.4.0
+pretty_midi>=0.2.10
 
