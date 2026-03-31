@@ -1,3 +1,42 @@
+백엔드에서 만든 alphatex를 프론트가 직접 쓰는지 확인 (현재는 score 기반으로 프론트가 재생성)
+프론트의 bucketSec=0.125 병합/절삭 제거 또는 완화
+고정 4/4, 고정 :16 제거
+note duration/tempo changes/time signature 반영
+string/fret 매핑을 단순 “최소 프렛”에서 “포지션 연속성 최소 비용” 디코더로 교체
+CDN @latest 고정 대신 버전 핀(예: @1.x.x)으로 재현성 확보
+MIDI 검증 UI에 “노트 수/최대 프렛/추정 BPM” 요약 표시(품질 점검이 더 쉬워짐)
+노트 길이(8분/4분 등) 보존 양자화
+동일 시점 음표 묶음(코드) 안정화
+박자 기반 쉼표 생성
+마디 단위 duration 토큰 생성(현재보다 정교한 AlphaTex)
+노트 길이(8분/4분 등) 보존 양자화
+동일 시점 음표 묶음(코드) 안정화
+박자 기반 쉼표 생성
+마디 단위 duration 토큰 생성(현재보다 정교한 AlphaTex)
+midiLoad/midiEventsPlayed로 변환 결과 MIDI의 이벤트 분포를 계측
+midiTickShift로 타임축 보정
+이 계측값을 바탕으로 나중에 백엔드 변환 파라미터(양자화 단위, rest 압축, velocity threshold)를 튜닝
+A. alphaTex 생성 시 실제 시간축 기반 리듬 복원
+지금은 토큰 개수로 마디를 채우는 방식이라, 원곡의 당김음/쉼표 길이/길게 지속되는 음이 많이 왜곡됩니다.
+개선 방향:
+MIDI note start/end를 기준으로 duration 단위(최소 1/16, 필요 시 1/32) 계산
+같은 슬롯에서도 음 길이 유지(현재는 대부분 동일 길이로 평탄화됨)
+무음 구간을 “잘라내기”보다 “축약 규칙”으로 보존 (지금은 empty_run > 8에서 스킵)
+관련 문서: tex, Data Model
+B. 박자/템포 추정 단순화 완화
+현재는 템포 변화/복합 박자를 거의 반영하지 않습니다(첫 템포 + 4/4 고정에 가깝게 처리).
+최소한:
+템포 변화가 있는 곡은 구간별 평균 템포/대표 템포 처리
+박자 정보 추정 실패 시에도 내부적으로 “불확실 플래그”를 두고 과도한 정규화를 피하기
+C. 튜닝 배열/스트링 기준 일관성 점검
+프론트/백엔드에 튜닝 순서가 혼재되어 보입니다([64..40] vs [40..64]).
+스트링 번호(1번줄=고음 E) 기준과 튜닝 배열 순서를 통일하지 않으면 특정 기능에서 음정/표기 불일치가 생길 수 있습니다.
+D. scoreLoaded에서 후처리할 때 updateSyncPoints() 고려
+scoreLoaded는 렌더/미디 생성 전 점검 훅으로 유용합니다.
+만약 score data model을 수정하는 로직(예: 특정 노트 정리)을 넣는다면 updateSyncPoints() 호출 경로를 설계해야 합니다.
+관련 문서: score, scoreLoaded, updateSyncPoints, tracks, uiFacade
+
+
 백엔드 서버 시작
 cd "c:\Users\kwakm\OneDrive\Desktop\Cusor-Project\AI-Guitar-Tab-main"
 $env:AI_GUITAR_ENABLE_DEMUCS = "1"

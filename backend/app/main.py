@@ -1,14 +1,14 @@
 import asyncio
-import json
-import queue
+from urllib.parse import urlparse
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from pathlib import Path
+
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, HttpUrl
 
-from .services.pipeline import run_four_step_pipeline
+from .services.pipeline import _midi_to_alphatex, _midi_to_score, run_four_step_pipeline
 
 app = FastAPI(title="AI Guitar Tab Backend")
 
@@ -19,6 +19,8 @@ app.add_middleware(
         "http://127.0.0.1:3000",
         "http://localhost:3001",
         "http://127.0.0.1:3001",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -28,14 +30,47 @@ app.add_middleware(
 
 class PipelineRequest(BaseModel):
     url: HttpUrl
+    jobId: str | None = None
 
 
-class PipelineResponse(BaseModel):
-    job_dir: str
-    mp3_path: str
-    stems: dict[str, str]
-    midi_path: str
+def _is_supported_youtube_url(raw_url: str) -> bool:
+    parsed = urlparse(raw_url)
+    host = (parsed.hostname or "").lower()
+    return host in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
+
+
+class YoutubeTabPreviewResponse(BaseModel):
+    title: str
+    artist: str
+    lyrics: str | None = None
+    score: dict[str, Any]
     alphatex: str
+
+
+class MidiTabPreviewResponse(BaseModel):
+    title: str
+    score: dict[str, Any]
+    alphatex: str
+
+
+class PipelineProgressResponse(BaseModel):
+    progress: int
+    stage: str
+    detail: str
+    done: bool = False
+    error: str | None = None
+
+
+_PIPELINE_PROGRESS: dict[str, dict[str, Any]] = {}
+
+
+def _sanitize_upload_filename(filename: str) -> str:
+    base = Path(filename).name.strip() or "uploaded.mid"
+    safe = "".join(ch for ch in base if ch.isalnum() or ch in ("-", "_", ".", " "))
+    safe = safe.strip().replace(" ", "_")
+    if not safe:
+        safe = "uploaded.mid"
+    return safe
 
 
 @app.get("/health")
@@ -43,62 +78,103 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
-@app.post("/api/pipeline/run", response_model=PipelineResponse)
-async def pipeline_run(payload: PipelineRequest) -> PipelineResponse:
+@app.post("/api/youtube/tab-preview", response_model=YoutubeTabPreviewResponse)
+async def youtube_tab_preview(payload: PipelineRequest) -> YoutubeTabPreviewResponse:
+    progress_id = (payload.jobId or "").strip() or f"job-{id(payload)}"
     try:
+        if not _is_supported_youtube_url(str(payload.url)):
+            raise HTTPException(status_code=400, detail="유튜브 URL만 지원합니다.")
+        _PIPELINE_PROGRESS[progress_id] = {
+            "progress": 0,
+            "stage": "queued",
+            "detail": "요청 수신",
+            "done": False,
+            "error": None,
+        }
+
+        def _on_progress(evt: dict[str, Any]) -> None:
+            _PIPELINE_PROGRESS[progress_id] = {
+                "progress": int(evt.get("progress", 0)),
+                "stage": str(evt.get("stage", "running")),
+                "detail": str(evt.get("detail", "")),
+                "done": False,
+                "error": None,
+            }
+
         result = await asyncio.wait_for(
-            asyncio.to_thread(run_four_step_pipeline, str(payload.url)),
+            asyncio.to_thread(run_four_step_pipeline, str(payload.url), progress_cb=_on_progress),
             timeout=1800.0,
         )
-        return PipelineResponse(
-            job_dir=str(result.job_dir),
-            mp3_path=str(result.mp3_path),
-            stems={k: str(v) for k, v in result.stems.items()},
-            midi_path=str(result.midi_path),
+        _PIPELINE_PROGRESS[progress_id] = {
+            "progress": 100,
+            "stage": "done",
+            "detail": "완료",
+            "done": True,
+            "error": None,
+        }
+        return YoutubeTabPreviewResponse(
+            title=result.title,
+            artist=result.artist,
+            lyrics=result.lyrics,
+            score=result.score,
             alphatex=result.alphatex,
         )
     except TimeoutError as exc:
-        raise HTTPException(status_code=504, detail="파이프라인 실행 시간이 30분을 초과했습니다.") from exc
+        _PIPELINE_PROGRESS[progress_id] = {
+            "progress": int(_PIPELINE_PROGRESS.get(progress_id, {}).get("progress", 0)),
+            "stage": "timeout",
+            "detail": "분석 시간이 30분을 초과했습니다.",
+            "done": True,
+            "error": "timeout",
+        }
+        raise HTTPException(status_code=504, detail="분석 시간이 30분을 초과했습니다.") from exc
     except Exception as exc:
+        _PIPELINE_PROGRESS[progress_id] = {
+            "progress": int(_PIPELINE_PROGRESS.get(progress_id, {}).get("progress", 0)),
+            "stage": "error",
+            "detail": str(exc),
+            "done": True,
+            "error": str(exc),
+        }
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.get("/api/pipeline/run-stream")
-async def pipeline_run_stream(url: HttpUrl):
-    q: "queue.Queue[dict]" = queue.Queue()
-
-    def report(ev: dict[str, Any]) -> None:
-        q.put(ev)
-
-    def run() -> None:
-        try:
-            result = run_four_step_pipeline(str(url), progress_cb=report)
-            q.put(
-                {
-                    "type": "done",
-                    "payload": {
-                        "job_dir": str(result.job_dir),
-                        "mp3_path": str(result.mp3_path),
-                        "stems": {k: str(v) for k, v in result.stems.items()},
-                        "midi_path": str(result.midi_path),
-                        "alphatex": result.alphatex,
-                    },
-                }
-            )
-        except Exception as exc:
-            q.put({"type": "error", "detail": str(exc)})
-
-    asyncio.get_running_loop().run_in_executor(None, run)
-
-    async def gen():
-        while True:
-            ev = await asyncio.to_thread(q.get)
-            yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
-            if ev.get("type") in ("done", "error"):
-                break
-
-    return StreamingResponse(
-        gen(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+@app.get("/api/youtube/tab-preview/progress/{job_id}", response_model=PipelineProgressResponse)
+async def youtube_tab_preview_progress(job_id: str) -> PipelineProgressResponse:
+    item = _PIPELINE_PROGRESS.get(job_id)
+    if not item:
+        return PipelineProgressResponse(progress=0, stage="idle", detail="대기 중", done=False, error=None)
+    return PipelineProgressResponse(
+        progress=int(item.get("progress", 0)),
+        stage=str(item.get("stage", "running")),
+        detail=str(item.get("detail", "")),
+        done=bool(item.get("done", False)),
+        error=item.get("error"),
     )
+
+
+@app.post("/api/midi/tab-preview", response_model=MidiTabPreviewResponse)
+async def midi_tab_preview(file: UploadFile = File(...)) -> MidiTabPreviewResponse:
+    try:
+        filename = _sanitize_upload_filename(file.filename or "uploaded.mid")
+        lower_name = filename.lower()
+        if not (lower_name.endswith(".mid") or lower_name.endswith(".midi")):
+            raise HTTPException(status_code=400, detail="MIDI 파일(.mid, .midi)만 지원합니다.")
+
+        data = await file.read()
+        if not data:
+            raise HTTPException(status_code=400, detail="업로드한 MIDI 파일이 비어 있습니다.")
+
+        uploads_dir = Path("data") / "uploads"
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+        midi_path = uploads_dir / filename
+        midi_path.write_bytes(data)
+
+        title = Path(filename).stem or "Uploaded MIDI"
+        score = _midi_to_score(midi_path, title=title)
+        alphatex = _midi_to_alphatex(midi_path, title=title)
+        return MidiTabPreviewResponse(title=title, score=score, alphatex=alphatex)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
