@@ -32,10 +32,9 @@ body {
   border-radius: 2px;
 }
 
+/* 비트 세로 커서: 하이라이트(.at-highlight)만으로 충분해 시각적으로 숨김 */
 .alphaTab .at-cursor-beat {
-  background: rgba(234, 179, 8, 0.95);
-  border-radius: 2px;
-  width: 4px;
+  display: none !important;
 }
 
 .alphaTab .at-highlight {

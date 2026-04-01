@@ -43,6 +43,7 @@ class YoutubeTabPreviewResponse(BaseModel):
     title: str
     artist: str
     lyrics: str | None = None
+    lyrics_source: str | None = None
     score: dict[str, Any]
     alphatex: str
 
@@ -116,6 +117,7 @@ async def youtube_tab_preview(payload: PipelineRequest) -> YoutubeTabPreviewResp
             title=result.title,
             artist=result.artist,
             lyrics=result.lyrics,
+            lyrics_source=result.lyrics_source,
             score=result.score,
             alphatex=result.alphatex,
         )
@@ -171,8 +173,8 @@ async def midi_tab_preview(file: UploadFile = File(...)) -> MidiTabPreviewRespon
         midi_path.write_bytes(data)
 
         title = Path(filename).stem or "Uploaded MIDI"
-        score = _midi_to_score(midi_path, title=title)
-        alphatex = _midi_to_alphatex(midi_path, title=title)
+        score = _midi_to_score(midi_path, title=title, capo=0)
+        alphatex = _midi_to_alphatex(midi_path, title=title, capo=0)
         return MidiTabPreviewResponse(title=title, score=score, alphatex=alphatex)
     except HTTPException:
         raise

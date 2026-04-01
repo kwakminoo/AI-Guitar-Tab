@@ -24,6 +24,9 @@ export type AlphaTabScore = {
   version: number;
   meta: {
     title: string;
+    /** 백엔드가 채울 수 있음 (LRCLIB 등) */
+    artist?: string;
+    lyrics?: string | null;
     tempo: number;
     timeSignature: { numerator: number; denominator: number };
     key: string;

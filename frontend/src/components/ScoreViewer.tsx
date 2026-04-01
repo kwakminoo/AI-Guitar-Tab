@@ -336,6 +336,8 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
   const [playerStateText, setPlayerStateText] = useState("정지");
   const [outputDevices, setOutputDevices] = useState<Array<{ id?: string; label?: string }>>([]);
   const [selectedOutputDeviceId, setSelectedOutputDeviceId] = useState("default");
+  /** 가사 박스만 / 타브 악보만 (가사가 있을 때만 의미 있음) */
+  const [scorePanelMode, setScorePanelMode] = useState<"lyrics" | "tab">("tab");
   const selectionStartMsRef = useRef<number | null>(null);
   const selectionStartTickRef = useRef<number | null>(null);
   const previousSecondRef = useRef(-1);
@@ -346,6 +348,28 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
       setAllowSeekByClick(false);
     }
   }, [isStudyMode]);
+
+  useEffect(() => {
+    if (!songLyrics?.trim()) {
+      setScorePanelMode("tab");
+    }
+  }, [songLyrics]);
+
+  const scorePanelInitialTab = useRef(true);
+  useEffect(() => {
+    scorePanelInitialTab.current = true;
+  }, [songLyrics]);
+  useEffect(() => {
+    if (scorePanelMode !== "tab") return;
+    if (scorePanelInitialTab.current) {
+      scorePanelInitialTab.current = false;
+      return;
+    }
+    const id = window.setTimeout(() => {
+      apiRef.current?.render?.();
+    }, 50);
+    return () => window.clearTimeout(id);
+  }, [scorePanelMode]);
 
   const workingScore = score ?? nullBaseline;
   const hasBackendAlphaTex = Boolean(alphaTex && alphaTex.trim().length > 0);
@@ -409,6 +433,16 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
       if (alphaTab.TabRhythmMode?.Automatic !== undefined) {
         settings.notation.rhythmMode = alphaTab.TabRhythmMode.Automatic;
       }
+      const NE = (
+        alphaTab as unknown as {
+          NotationElement?: Record<string, number>;
+        }
+      ).NotationElement;
+      const notationElements = (settings.notation as unknown as { elements?: Map<number, boolean> })
+        .elements;
+      if (NE?.EffectLyrics !== undefined && notationElements) {
+        notationElements.set(NE.EffectLyrics, true);
+      }
       settings.player.enablePlayer = true;
       settings.player.enableCursor = true;
       settings.player.enableElementHighlighting = true;
@@ -461,7 +495,8 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
             const bar = beatBounds?.barBounds?.masterBarBounds?.visualBounds;
             if (!bar) return;
             beatCursor.transitionToX(0, startBeatX);
-            beatCursor.setBounds(startBeatX, bar.y, 2, bar.h);
+            /* 세로 비트 커서는 숨김 — 마디 박스(.at-cursor-bar) + 음표 하이라이트만 사용 */
+            beatCursor.setBounds(startBeatX, bar.y, 0, 0);
           },
           transitionBeatCursor: () => {},
         };
@@ -622,7 +657,7 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
         const tick = Number(api.tickPosition ?? 0);
         if (api.tickCache && Number.isFinite(tick)) {
           const lookup = api.tickCache.findBeat(new Set(api.tracks.map((t) => t.index)), tick);
-          if (lookup?.currentBeat) {
+          if (lookup?.beat) {
             setPlayedBeatText(`tickCache 비트 추적 중 (tick ${Math.floor(tick)})`);
           }
         }
@@ -920,7 +955,6 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
     }
   };
 
-  const titleText = workingScore.meta.title || songTitle || "빈 악보";
   const artistText = (songArtist ?? "").trim();
 
   return (
@@ -1013,20 +1047,9 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
                   {abRangeMs !== null ? ` · AB ${formatDurationMs(abRangeMs)}` : ""}
                 </p>
                 <div className="w-full space-y-0.5 text-center">
-                  <p className="truncate text-sm font-semibold text-zinc-900" title={titleText}>
-                    {titleText}
-                  </p>
                   {artistText ? (
                     <p className="truncate text-xs text-zinc-500" title={artistText}>
                       {artistText}
-                    </p>
-                  ) : null}
-                  {songLyrics?.trim() ? (
-                    <p
-                      className="max-h-14 overflow-hidden pt-1 text-[11px] leading-snug text-zinc-500"
-                      title={songLyrics}
-                    >
-                      {songLyrics}
                     </p>
                   ) : null}
                 </div>
@@ -1291,11 +1314,70 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
               악보 렌더링 오류: {modelError ?? renderError}
             </div>
           )}
-          <div className="mx-auto mb-3 mt-1 max-w-[1100px] text-center">
-            <p className="text-4xl font-semibold tracking-tight text-zinc-900">{titleText}</p>
-            {artistText ? <p className="mt-1 text-2xl text-zinc-700">{artistText}</p> : null}
+          {songLyrics?.trim() ? (
+            <div
+              className="mx-auto mb-3 flex w-full max-w-[1100px] flex-wrap items-center gap-2"
+              role="tablist"
+              aria-label="악보 보기 전환"
+            >
+              <button
+                type="button"
+                role="tab"
+                aria-selected={scorePanelMode === "lyrics"}
+                aria-controls="score-panel-lyrics"
+                id="tab-lyrics"
+                onClick={() => setScorePanelMode("lyrics")}
+                className={`rounded-lg border px-3 py-2 text-xs font-medium transition ${
+                  scorePanelMode === "lyrics"
+                    ? "border-zinc-900 bg-zinc-900 text-white"
+                    : "border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50"
+                }`}
+              >
+                가사악보
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={scorePanelMode === "tab"}
+                aria-controls="score-panel-tab"
+                id="tab-tab"
+                onClick={() => setScorePanelMode("tab")}
+                className={`rounded-lg border px-3 py-2 text-xs font-medium transition ${
+                  scorePanelMode === "tab"
+                    ? "border-zinc-900 bg-zinc-900 text-white"
+                    : "border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50"
+                }`}
+              >
+                타브악보
+              </button>
+            </div>
+          ) : null}
+          {songLyrics?.trim() && scorePanelMode === "lyrics" ? (
+            <section
+              id="score-panel-lyrics"
+              role="tabpanel"
+              aria-labelledby="tab-lyrics"
+              className="mx-auto mb-3 w-full max-w-[1100px] rounded-lg border border-zinc-200 bg-zinc-50 px-4 py-3 text-zinc-800"
+              aria-label="가사"
+            >
+              <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">가사</h2>
+              <div className="max-h-[min(70vh,28rem)] overflow-y-auto whitespace-pre-wrap text-sm leading-relaxed">
+                {songLyrics.trim()}
+              </div>
+            </section>
+          ) : null}
+          <div
+            id="score-panel-tab"
+            role={songLyrics?.trim() ? "tabpanel" : undefined}
+            aria-labelledby={songLyrics?.trim() ? "tab-tab" : undefined}
+            className={
+              songLyrics?.trim() && scorePanelMode === "lyrics"
+                ? "hidden"
+                : "mx-auto min-h-full w-full max-w-[1100px]"
+            }
+          >
+            <div ref={mainRef} className="min-h-full w-full" />
           </div>
-          <div ref={mainRef} className="mx-auto min-h-full w-full max-w-[1100px]" />
         </div>
       </div>
     </div>
@@ -1309,12 +1391,18 @@ function buildAlphaTex(score: AlphaTabScore): string {
   const num = ts?.numerator ?? 4;
   const den = ts?.denominator ?? 4;
   const tempo = Number.isFinite(Number(score.meta.tempo)) ? Number(score.meta.tempo) : 90;
+  const rawLyrics = score.meta.lyrics;
+  const lyricsLine =
+    typeof rawLyrics === "string" && rawLyrics.trim().length > 0
+      ? `\\lyrics "${escapeTexLyrics(rawLyrics.trim())}"`
+      : "";
 
   const header = [
     `\\tempo ${score.meta.tempo}`,
     `\\ts (${num} ${den})`,
     `\\track "${escapeTex(t.name ?? "Guitar")}"`,
     "\\staff {score tabs}",
+    lyricsLine,
     capo > 0 ? `\\capo ${capo}` : "",
     "",
   ]
@@ -1461,6 +1549,17 @@ function buildAlphaTex(score: AlphaTabScore): string {
 
 function escapeTex(input: string): string {
   return input.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+}
+
+/** 백엔드 \\lyrics 와 동일: 한 줄로 합치고 alphaTex 문자열 이스케이프 */
+function escapeTexLyrics(input: string): string {
+  return input
+    .replace(/\r\n|\r|\n/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 12000)
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"');
 }
 
 function sanitizeBeatText(input: string | null | undefined): string | null {
@@ -1634,6 +1733,8 @@ function normalizeScoreForRendering(score: AlphaTabScore): AlphaTabScore | null 
     meta: {
       ...score.meta,
       title: score.meta.title || "From YouTube",
+      artist: score.meta.artist,
+      lyrics: score.meta.lyrics ?? null,
       tempo: Number.isFinite(Number(score.meta.tempo)) ? Number(score.meta.tempo) : 90,
       timeSignature: {
         numerator: Number.isFinite(Number(score.meta.timeSignature?.numerator))

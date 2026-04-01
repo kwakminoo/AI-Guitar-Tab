@@ -6,4 +6,7 @@ yt-dlp>=2024.4.9
 demucs==4.0.1
 basic-pitch>=0.4.0
 pretty_midi>=0.2.10
+librosa>=0.10.0
+numpy>=1.24.0
+soundfile>=0.12.0
 

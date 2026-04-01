@@ -1,7 +1,7 @@
 "use client";
 
 import { ScoreViewer, type AlphaTabScore } from "@/components/ScoreViewer";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 type SongMeta = {
   title: string;
@@ -37,6 +37,8 @@ export default function Home() {
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analyzeProgress, setAnalyzeProgress] = useState<number | null>(null);
+  /** 백엔드 진행 스냅샷이 바뀔 때만 UI 갱신(불필요한 리렌더·로딩바 깜빡임 방지) */
+  const lastProgressSnapshotRef = useRef<string>("");
 
   const handleAnalyze = async () => {
     if (!url.trim()) return;
@@ -51,6 +53,7 @@ export default function Home() {
     setSongMeta(null);
     setIsAnalyzing(true);
     setAnalyzeProgress(0);
+    lastProgressSnapshotRef.current = "";
 
     try {
       const poll = async () => {
@@ -63,25 +66,34 @@ export default function Home() {
             done?: boolean;
           };
           const p = Number(progressPayload.progress ?? 0);
-          if (Number.isFinite(p)) setAnalyzeProgress(Math.max(0, Math.min(100, p)));
-          if (progressPayload.detail) setStatus(progressPayload.detail);
+          const detail = typeof progressPayload.detail === "string" ? progressPayload.detail : "";
+          const stage = typeof progressPayload.stage === "string" ? progressPayload.stage : "";
+          const snapshot = `${p}|${stage}|${detail}|${Boolean(progressPayload.done)}`;
+          if (snapshot !== lastProgressSnapshotRef.current) {
+            lastProgressSnapshotRef.current = snapshot;
+            if (Number.isFinite(p)) setAnalyzeProgress(Math.max(0, Math.min(100, p)));
+            if (detail) setStatus(detail);
+          }
           if (progressPayload.done) stopped = true;
         } catch {
           // progress polling 실패는 본 요청을 중단시키지 않는다.
         }
       };
 
-      timer = window.setInterval(() => {
-        if (stopped) return;
-        void poll();
-      }, 1000);
-      await poll();
-
-      const res = await fetch(apiUrl("/api/youtube/tab-preview"), {
+      // POST가 오래 걸리므로 먼저 요청을 시작한 뒤, 같은 jobId로 진행률을 폴링해야 한다.
+      const postPromise = fetch(apiUrl("/api/youtube/tab-preview"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: url.trim(), jobId }),
       });
+
+      timer = window.setInterval(() => {
+        if (stopped) return;
+        void poll();
+      }, 700);
+      void poll();
+
+      const res = await postPromise;
       stopped = true;
 
       const payload = (await res.json().catch(() => ({}))) as {
@@ -190,9 +202,6 @@ export default function Home() {
           <div className="flex flex-col">
             <span className="text-lg font-semibold tracking-tight text-zinc-900">
               AI Guitar Tab
-            </span>
-            <span className="text-xs text-zinc-500">
-              유튜브에서 앞부분 오디오를 받아 리듬·기타 전사 후 타브 악보로 표시합니다
             </span>
           </div>
         </div>

@@ -16,10 +16,139 @@ from typing import Any, Callable
 
 import pretty_midi
 
+from .beat_audio import analyze_beats_from_mix_mp3, snap_midi_notes_to_sixteenth_grid
+from .lyrics_lrclib import fetch_lyrics_from_lrclib, parse_artist_and_track_from_youtube_title
+
 GUITAR_OPEN_MIDI = [64, 59, 55, 50, 45, 40]  # E4, B3, G3, D3, A2, E2
 GUITAR_MIN_PITCH = 40
 GUITAR_MAX_PITCH = 88
 MIN_NOTE_VELOCITY = 18
+
+# General MIDI program → alphaTab instrument 이름 (Structural Metadata 문서와 동일 계열)
+_GM_PROGRAM_TO_ALPHATAB: dict[int, str] = {
+    0: "Acoustic Grand Piano",
+    1: "Bright Grand Piano",
+    24: "Acoustic Guitar Nylon",
+    25: "Acoustic Guitar Steel",
+    26: "Electric Guitar Jazz",
+    27: "Electric Guitar Clean",
+    28: "Electric Guitar Muted",
+    29: "Overdriven Guitar",
+    30: "Distortion Guitar",
+    31: "Guitar Harmonics",
+    32: "Acoustic Bass",
+    33: "Electric Bass Finger",
+    34: "Electric Bass Pick",
+}
+
+
+def _midi_program_to_alphatab_instrument(program: int) -> str:
+    return _GM_PROGRAM_TO_ALPHATAB.get(int(program) % 128, "Acoustic Guitar Steel")
+
+
+def _get_primary_midi_program(midi: pretty_midi.PrettyMIDI) -> int:
+    for inst in midi.instruments:
+        if not inst.is_drum and inst.notes:
+            return int(inst.program)
+    for inst in midi.instruments:
+        if inst.notes:
+            return int(inst.program)
+    return 25
+
+
+def _parse_tempo_segments(midi: pretty_midi.PrettyMIDI) -> list[tuple[float, float]]:
+    times, tempos = midi.get_tempo_changes()
+    if times is None or len(times) == 0:
+        return [(0.0, 120.0)]
+    out: list[tuple[float, float]] = []
+    for i in range(len(times)):
+        out.append((float(times[i]), float(tempos[i])))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def _parse_time_signature_segments(midi: pretty_midi.PrettyMIDI) -> list[tuple[float, int, int]]:
+    raw = getattr(midi, "time_signature_changes", None) or []
+    if not raw:
+        return [(0.0, 4, 4)]
+    out: list[tuple[float, int, int]] = []
+    for ts in raw:
+        t = float(getattr(ts, "time", 0.0))
+        num = int(getattr(ts, "numerator", 4))
+        den = int(getattr(ts, "denominator", 4))
+        if num < 1:
+            num = 4
+        if den < 1:
+            den = 4
+        out.append((t, num, den))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def _segment_value_at(
+    segments: list[tuple[float, Any]],
+    t: float,
+    default: Any,
+) -> Any:
+    best: Any = default
+    for st, val in segments:
+        if st <= t + 1e-9:
+            best = val
+        else:
+            break
+    return best
+
+
+def _measure_units_16ths(numerator: int, denominator: int) -> int:
+    return max(1, int(numerator * 16 // denominator))
+
+
+def _probe_audio_duration_sec(path: Path) -> float | None:
+    try:
+        completed = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+        if completed.returncode != 0:
+            return None
+        line = (completed.stdout or "").strip().splitlines()
+        if not line:
+            return None
+        return float(line[0])
+    except (FileNotFoundError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
+def _velocity_to_dy(velocity: int) -> str:
+    v = max(0, min(127, int(velocity)))
+    if v < 28:
+        return "ppp"
+    if v < 40:
+        return "pp"
+    if v < 52:
+        return "p"
+    if v < 64:
+        return "mp"
+    if v < 80:
+        return "mf"
+    if v < 96:
+        return "f"
+    if v < 112:
+        return "ff"
+    return "fff"
 
 
 def _escape_alpha_tex_string(value: str) -> str:
@@ -28,6 +157,316 @@ def _escape_alpha_tex_string(value: str) -> str:
     cleaned = cleaned.replace("\\", "\\\\").replace('"', '\\"')
     # 과도하게 긴 문자열은 파서/렌더 부하 및 진단 노이즈를 유발하므로 상한을 둔다.
     return cleaned[:200]
+
+
+# \\lyrics 전용: alphaTab은 공백으로 음절을 나눠 박에 배치한다.
+# https://alphatab.net/docs/alphatex/metadata/staff/lyrics
+LYRICS_ALPHA_TEX_MAX_CHARS = 12000
+
+
+def _clean_alphatex_lyrics_text(value: str) -> str:
+    """이스케이프만 하고 길이 자르기 전 문자열 (잘림 여부 계산용)."""
+    cleaned = (value or "").replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = cleaned.replace("\n", " ").replace("\t", " ").strip()
+    cleaned = cleaned.replace("\\", "\\\\").replace('"', '\\"')
+    return cleaned
+
+
+def _escape_alpha_tex_lyrics(value: str) -> str:
+    return _clean_alphatex_lyrics_text(value)[:LYRICS_ALPHA_TEX_MAX_CHARS]
+
+
+def _alphatex_lyrics_truncation_info(raw: str) -> tuple[bool, int]:
+    c = _clean_alphatex_lyrics_text(raw)
+    truncated = len(c) > LYRICS_ALPHA_TEX_MAX_CHARS
+    return truncated, min(len(c), LYRICS_ALPHA_TEX_MAX_CHARS)
+
+
+def _write_lyrics_files(
+    job_dir: Path,
+    lyrics: str | None,
+    lyrics_source: str,
+    *,
+    alphatex_truncated: bool,
+    alphatex_lyrics_chars: int,
+) -> dict[str, Any]:
+    """
+    가사를 작업 폴더에 별도 파일로 저장한다.
+    - lyrics.txt: 작업 루트(한글 인코딩 UTF-8)
+    - tab/lyrics.txt: 악보와 같은 디렉터리 복사본
+    - tab/lyrics.json: 출처·길이·AlphaTex 반영 여부 메타
+    """
+    out: dict[str, Any] = {
+        "saved": False,
+        "paths": {},
+        "source": lyrics_source,
+    }
+    if not lyrics or not str(lyrics).strip():
+        return out
+    text = str(lyrics).strip()
+    tab_dir = job_dir / "tab"
+    tab_dir.mkdir(parents=True, exist_ok=True)
+
+    root_txt = job_dir / "lyrics.txt"
+    tab_txt = tab_dir / "lyrics.txt"
+    tab_meta = tab_dir / "lyrics.json"
+
+    root_txt.write_text(text, encoding="utf-8")
+    tab_txt.write_text(text, encoding="utf-8")
+    tab_meta.write_text(
+        json.dumps(
+            {
+                "source": lyrics_source,
+                "char_count": len(text),
+                "encoding": "utf-8",
+                "alphatex_lyrics_chars": alphatex_lyrics_chars,
+                "alphatex_lyrics_truncated": alphatex_truncated,
+                "files": {
+                    "plain_root": str(root_txt.as_posix()),
+                    "plain_next_to_alphatex": str(tab_txt.as_posix()),
+                },
+                "alphatex_note": (
+                    "guitar.alphatex 헤더의 \\\\lyrics 에 동일 가사가 들어가며, "
+                    "alphaTab이 박마다 음절을 배치한다. "
+                    "문법: https://alphatab.net/docs/alphatex/metadata/staff/lyrics"
+                ),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    out["saved"] = True
+    out["paths"] = {
+        "lyrics_txt": str(root_txt),
+        "tab_lyrics_txt": str(tab_txt),
+        "tab_lyrics_json": str(tab_meta),
+    }
+    return out
+
+
+def _description_fallback_lyrics(description: str | None) -> str | None:
+    """유튜브 설명 첫 줄이 실제 가사일 때만 보조 사용."""
+    if not description or not description.strip():
+        return None
+    first_paragraph = description.split("\n\n", 1)[0].strip()
+    if len(first_paragraph) < 8:
+        return None
+    if re.match(r"^https?://", first_paragraph.strip()):
+        return None
+    return first_paragraph[:800]
+
+
+def _resolve_youtube_lyrics(
+    title: str,
+    artist: str | None,
+    uploader: str | None,
+    description: str | None,
+    duration_youtube: float | None,
+    duration_audio: float | None,
+    cache_dir: Path,
+) -> tuple[str | None, str]:
+    """
+    LRCLIB 우선 → (옵션) ffprobe 길이로 재시도 → 유튜브 설명 폴백.
+    반환: (가사 텍스트, 출처 lrclib|lrclib_cache|youtube_description|none)
+    """
+    text, src = fetch_lyrics_from_lrclib(
+        title, artist, uploader, duration_youtube, cache_dir=cache_dir
+    )
+    if text and text.strip():
+        return text.strip(), src
+
+    if duration_audio is not None:
+        if duration_youtube is None or abs(float(duration_audio) - float(duration_youtube or 0)) > 1.0:
+            text2, src2 = fetch_lyrics_from_lrclib(
+                title, artist, uploader, duration_audio, cache_dir=cache_dir
+            )
+            if text2 and text2.strip():
+                return text2.strip(), src2
+
+    fb = _description_fallback_lyrics(description)
+    if fb:
+        return fb, "youtube_description"
+    return None, "none"
+
+
+def _merge_chord_into_beat_token(token: str, ch_label: str) -> str:
+    """
+    alphaTab은 박당 beat effect가 **하나의** `{ ... }` 블록만 허용한다.
+    `{dy mp}{ch "C"}`는 두 번째 `{`가 다음 박으로 잘못 읽혀 AT202가 난다.
+    → `{dy mp ch "C"}` 또는 `{ch "C"}` 한 블록으로 합친다.
+    """
+    if not ch_label:
+        return token
+    esc = _escape_alpha_tex_string(ch_label)
+    ch_prop = f'ch "{esc}"'
+    start = token.find("{")
+    if start != -1:
+        depth = 0
+        for i in range(start, len(token)):
+            if token[i] == "{":
+                depth += 1
+            elif token[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return token[:i] + f" {ch_prop}" + token[i:]
+    return f"{token} {{{ch_prop}}}"
+
+
+def _guess_capo_from_text(*texts: str | None) -> int:
+    """제목/설명에서 capo(0~12) 추정. 없으면 0."""
+    blob = " ".join(t for t in texts if t)
+    for pat in (
+        r"(?i)capo\s*[:=]?\s*(\d{1,2})",
+        r"(?i)카포\s*(\d{1,2})",
+        r"(?i)(\d{1,2})\s*카포",
+        r"(?i)캡\s*o\s*(\d{1,2})",
+        r"(?i)(\d{1,2})\s*fret",
+    ):
+        m = re.search(pat, blob)
+        if m:
+            v = int(m.group(1))
+            if 0 <= v <= 12:
+                return v
+    return 0
+
+
+def _raw_guitar_notes_from_midi(midi: pretty_midi.PrettyMIDI) -> list[dict[str, Any]]:
+    """코드 추정용: 기타 음역 MIDI 노트(연주 음높이, concert pitch)."""
+    out: list[dict[str, Any]] = []
+    for inst in midi.instruments:
+        if inst.is_drum:
+            continue
+        for note in inst.notes:
+            if note.end <= note.start:
+                continue
+            if int(note.velocity) < MIN_NOTE_VELOCITY:
+                continue
+            if not (GUITAR_MIN_PITCH <= int(note.pitch) <= GUITAR_MAX_PITCH):
+                continue
+            out.append(
+                {
+                    "pitch": int(note.pitch),
+                    "start": float(note.start),
+                    "end": float(note.end),
+                    "velocity": int(note.velocity),
+                }
+            )
+    return out
+
+
+def _midi_has_named_chord_track_hint(midi: pretty_midi.PrettyMIDI) -> bool:
+    """일반 MIDI에 '코드 전용' 트랙이 명시된 경우(휴리스틱). Basic Pitch 출력은 대부분 False."""
+    for inst in midi.instruments:
+        n = (inst.name or "").lower()
+        if "chord" in n and "solo" not in n:
+            return True
+    return False
+
+
+_PC_NAMES_SHARP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+
+def _pc_to_name(pc: int) -> str:
+    return _PC_NAMES_SHARP[pc % 12]
+
+
+_CHORD_CANDIDATES: list[tuple[str, tuple[int, ...]]] = [
+    ("", (0, 4, 7)),
+    ("m", (0, 3, 7)),
+    ("7", (0, 4, 7, 10)),
+    ("m7", (0, 3, 7, 10)),
+    ("maj7", (0, 4, 7, 11)),
+    ("m7b5", (0, 3, 6, 10)),
+    ("dim", (0, 3, 6)),
+    ("sus4", (0, 5, 7)),
+    ("sus2", (0, 2, 7)),
+    ("add9", (0, 4, 7, 2)),
+]
+
+
+def _best_chord_from_weights(weights: list[float], capo: int) -> str | None:
+    """concert 음높이 가중치 → 운지 이름(카포만큼 반음 아래로 표기)."""
+    total = sum(weights)
+    if total < 1e-6:
+        return None
+    w = [float(x) for x in weights]
+    best_score = -1e9
+    best_label: str | None = None
+    for root in range(12):
+        for suffix, intervals in _CHORD_CANDIDATES:
+            template = {(root + i) % 12 for i in intervals}
+            score = sum(w[p] for p in template)
+            extra = sum(w[p] for p in range(12) if p not in template)
+            adj = score - 0.22 * extra
+            if adj > best_score + 1e-9:
+                best_score = adj
+                shape_root = (root - int(capo)) % 12
+                best_label = f"{_pc_to_name(shape_root)}{suffix}"
+    if best_label is None or best_score < total * 0.06:
+        return None
+    return best_label
+
+
+def _chord_for_time_range(
+    raw_notes: list[dict[str, Any]],
+    t0: float,
+    t1: float,
+    capo: int,
+) -> str | None:
+    weights = [0.0] * 12
+    for n in raw_notes:
+        ov = min(n["end"], t1) - max(n["start"], t0)
+        if ov > 0:
+            weights[n["pitch"] % 12] += ov
+    return _best_chord_from_weights(weights, capo)
+
+
+def _bar_chord_labels(
+    raw_notes: list[dict[str, Any]],
+    bars_info: list[tuple[float, float, int, int, float, int]],
+    capo: int,
+) -> list[str]:
+    out: list[str] = []
+    prev: str | None = None
+    for bs, be, *_r in bars_info:
+        label = _chord_for_time_range(raw_notes, bs, be, capo)
+        if not label:
+            label = prev if prev else "?"
+        out.append(label)
+        prev = label
+    return out
+
+
+def _compute_bars_info(
+    midi: pretty_midi.PrettyMIDI,
+    max_end: float,
+    *,
+    bpm_override: float | None = None,
+) -> list[tuple[float, float, int, int, float, int]]:
+    """박자표·템포 구간에 따른 마디 타임라인(_midi_to_alphatex와 동일 규칙)."""
+    eps = 1e-6
+    tempo_segments = _parse_tempo_segments(midi)
+    ts_segments = _parse_time_signature_segments(midi)
+    ts_pairs: list[tuple[float, tuple[int, int]]] = [(t, (n, d)) for t, n, d in ts_segments]
+    bars_info: list[tuple[float, float, int, int, float, int]] = []
+    t_cursor = 0.0
+    while t_cursor < max_end + eps or not bars_info:
+        num_d = _segment_value_at(ts_pairs, t_cursor, (4, 4))
+        num, den = num_d[0], num_d[1]
+        if bpm_override is not None:
+            bpm = float(bpm_override)
+        else:
+            bpm = float(_segment_value_at(tempo_segments, t_cursor, 120.0))
+        bpm = max(20.0, min(300.0, bpm))
+        measure_units = _measure_units_16ths(num, den)
+        measure_sec = measure_units * (60.0 / bpm) / 4.0
+        bars_info.append((t_cursor, t_cursor + measure_sec, num, den, bpm, measure_units))
+        t_cursor += measure_sec
+        if len(bars_info) > 100_000:
+            break
+    return bars_info
 
 
 def _validate_alphatex_with_alphatab(tex: str) -> dict[str, Any]:
@@ -290,6 +729,7 @@ class PipelineResult:
     title: str
     artist: str
     lyrics: str | None
+    lyrics_source: str
 
 
 def _safe_job_name(url: str) -> str:
@@ -352,7 +792,11 @@ def _download_mp3(url: str, out_dir: Path) -> Path:
     return target
 
 
-def _fetch_youtube_meta(url: str) -> tuple[str, str | None, str | None]:
+def _fetch_youtube_meta(url: str) -> tuple[str, str | None, str | None, float | None, str | None]:
+    """
+    반환: title, artist(트랙 메타·없을 수 있음), description(설명 전체), duration_sec, uploader
+    가사는 LRCLIB 등에서 별도 해석한다.
+    """
     completed = subprocess.run(
         [sys.executable, "-m", "yt_dlp", "--dump-single-json", "--skip-download", "--no-warnings", url],
         capture_output=True,
@@ -361,22 +805,27 @@ def _fetch_youtube_meta(url: str) -> tuple[str, str | None, str | None]:
         errors="replace",
     )
     if completed.returncode != 0:
-        return _safe_job_name(url), None, None
+        return _safe_job_name(url), None, None, None, None
     try:
         data = json.loads(completed.stdout or "{}")
     except Exception:
-        return _safe_job_name(url), None, None
+        return _safe_job_name(url), None, None, None, None
     title = str(data.get("title") or _safe_job_name(url))
-    artist = data.get("artist") or data.get("uploader") or data.get("channel")
+    artist = data.get("artist")
     if artist is not None:
-        artist = str(artist)
+        artist = str(artist).strip() or None
+    uploader = data.get("uploader") or data.get("channel")
+    if uploader is not None:
+        uploader = str(uploader).strip() or None
     description = str(data.get("description") or "").strip()
-    lyrics = None
-    if description:
-        first_paragraph = description.split("\n\n", 1)[0].strip()
-        if len(first_paragraph) > 0:
-            lyrics = first_paragraph[:400]
-    return title, artist, lyrics
+    duration_sec: float | None = None
+    raw_dur = data.get("duration")
+    if raw_dur is not None:
+        try:
+            duration_sec = float(raw_dur)
+        except (TypeError, ValueError):
+            duration_sec = None
+    return title, artist, description or None, duration_sec, uploader
 
 
 def _separate_demucs(mp3_path: Path, out_dir: Path) -> dict[str, Path]:
@@ -657,18 +1106,34 @@ def _quantized_beats_from_midi(midi: pretty_midi.PrettyMIDI, tempo: float) -> tu
     return beats, step
 
 
-def _midi_to_alphatex(midi_path: Path, title: str) -> str:
+def _midi_to_alphatex(
+    midi_path: Path,
+    title: str,
+    *,
+    artist: str = "",
+    lyrics: str | None = None,
+    audio_duration_sec: float | None = None,
+    capo: int = 0,
+    tempo_override: float | None = None,
+) -> str:
     midi = pretty_midi.PrettyMIDI(str(midi_path))
-    tempo = 120.0
-    _times, tempi = midi.get_tempo_changes()
-    if len(tempi) > 0:
-        tempo = float(tempi[0])
+    tempo_segments = _parse_tempo_segments(midi)
+    ts_segments = _parse_time_signature_segments(midi)
+    tempo0 = float(tempo_override) if tempo_override is not None else float(tempo_segments[0][1])
+    tempo0 = max(20.0, min(300.0, tempo0))
 
-    # title 문자열을 먼저 안전하게 이스케이프한다(lexer 오류 대부분이 여기서 발생한다).
     safe_title = _escape_alpha_tex_string(title)
+    safe_artist = _escape_alpha_tex_string(artist) if artist else ""
+    lyrics_line = ""
+    if lyrics and lyrics.strip():
+        lyrics_line = f"\\lyrics \"{_escape_alpha_tex_lyrics(lyrics.strip())}\"\n"
 
-    beats, _grid_step_sec = _quantized_beats_from_midi(midi, tempo)
+    inst_name = _midi_program_to_alphatab_instrument(_get_primary_midi_program(midi))
+
+    beats, _grid_step_sec = _quantized_beats_from_midi(midi, tempo0)
     beats = sorted(beats, key=lambda b: float(b.get("time", 0.0)))
+
+    suppress_mid_bar_midi_tempo = tempo_override is not None
 
     note_events: list[dict[str, Any]] = []
     for b in beats:
@@ -688,15 +1153,9 @@ def _midi_to_alphatex(midi_path: Path, title: str) -> str:
             )
 
     base_den = 16
-    quarter_sec = 60.0 / max(1.0, tempo)
-    base_unit_sec = quarter_sec / 4.0  # 1/16
-    measure_units_target = 16  # 4/4 in 1/16 grid
-    measure_sec = measure_units_target * base_unit_sec
 
     def duration_seconds_to_den(duration_sec: float, base_unit_sec_: float) -> int:
-        # alphaTex durationChange value는 분모(예: :4, :8, :16, :32)로 해석된다.
         units = duration_sec / max(1e-9, base_unit_sec_)
-        # :16이 1/16, :8이 1/8(=2 units), :32가 1/32(=0.5 units) ...
         allowed = [32, 16, 8, 4, 2, 1]
         best_den = 16
         best_diff = float("inf")
@@ -710,19 +1169,15 @@ def _midi_to_alphatex(midi_path: Path, title: str) -> str:
 
     eps = 1e-6
 
-    # alphaTex body는 “note interval 경계 + 마디 경계”에서 내용이 바뀌도록 만든다.
-    max_end = max([n["end"] for n in note_events], default=0.0)
-    last_bar_end = measure_sec if max_end <= eps else math.ceil(max_end / measure_sec) * measure_sec
+    ts_pairs: list[tuple[float, tuple[int, int]]] = [(t, (n, d)) for t, n, d in ts_segments]
+    raw_notes = _raw_guitar_notes_from_midi(midi)
+    max_q = max([n["end"] for n in note_events], default=0.0)
+    max_raw = max([n["end"] for n in raw_notes], default=0.0)
+    max_end = max(max_q, max_raw, 0.01)
 
-    boundaries: set[float] = {0.0, last_bar_end}
-    for n in note_events:
-        boundaries.add(float(n["start"]))
-        boundaries.add(float(n["end"]))
-
-    t = 0.0
-    while t <= last_bar_end + eps:
-        boundaries.add(float(t))
-        t += measure_sec
+    # 가변 마디 길이(박자표·템포) 타임라인
+    bars_info = _compute_bars_info(midi, max_end, bpm_override=tempo_override)
+    bar_chords = _bar_chord_labels(raw_notes, bars_info, int(capo))
 
     def uniq_sorted(values: list[float]) -> list[float]:
         values_sorted = sorted(values)
@@ -732,17 +1187,13 @@ def _midi_to_alphatex(midi_path: Path, title: str) -> str:
                 out.append(round(v, 6))
         return out
 
-    sorted_boundaries = uniq_sorted(list(boundaries))
-
-    def active_content(t0: float) -> str:
-        # t0에서 active인 note들만 모아 alphaTex token으로 만든다.
+    def active_content_with_dy(t0: float, prev_dy: str | None) -> tuple[str, str | None]:
         active: list[dict[str, Any]] = [
             n for n in note_events if n["start"] <= t0 + eps and n["end"] > t0 + eps
         ]
         if not active:
-            return "r"
+            return "r", prev_dy
 
-        # 같은 string에서 겹치는 note는 더 강한 velocity + 낮은 프렛 우선으로 하나만 남긴다.
         by_string: dict[int, dict[str, Any]] = {}
         for n in active:
             s = int(n["string"])
@@ -754,20 +1205,51 @@ def _midi_to_alphatex(midi_path: Path, title: str) -> str:
                 by_string[s] = n
 
         chosen = sorted(by_string.values(), key=lambda x: (x["string"], x["fret"]))
+        max_vel = max(int(n["velocity"]) for n in chosen)
+        dy = _velocity_to_dy(max_vel)
         if len(chosen) == 1:
             cn = chosen[0]
-            return f"{cn['fret']}.{cn['string']}"
+            base = f"{cn['fret']}.{cn['string']}"
+        else:
+            chord = " ".join(f"{n['fret']}.{n['string']}" for n in chosen)
+            base = f"({chord})"
 
-        chord = " ".join(f"{n['fret']}.{n['string']}" for n in chosen)
-        return f"({chord})"
+        if prev_dy is None or dy != prev_dy:
+            return f"{base} {{dy {dy}}}", dy
+        return base, prev_dy
 
+    bars: list[str] = []
+    prev_dy: str | None = None
+
+    first_ts = _segment_value_at(ts_pairs, 0.0, (4, 4))
+    first_bpm = (
+        float(tempo_override)
+        if tempo_override is not None
+        else float(_segment_value_at(tempo_segments, 0.0, 120.0))
+    )
+    first_bpm = max(20.0, min(300.0, first_bpm))
+    printed_ts: tuple[int, int] = first_ts
+    printed_bpm: float = first_bpm
+
+    last_bar_end = bars_info[-1][1] if bars_info else 0.0
+    boundaries: set[float] = {0.0, last_bar_end}
+    for n in note_events:
+        boundaries.add(float(n["start"]))
+        boundaries.add(float(n["end"]))
+    for bs, be, *_r in bars_info:
+        boundaries.add(bs)
+        boundaries.add(be)
+    sorted_boundaries = uniq_sorted(list(boundaries))
+
+    bar_idx = 0
     bar_tokens: list[str] = []
     bar_units = 0.0
-    bars: list[str] = []
 
-    def push_bar() -> None:
-        nonlocal bar_tokens, bar_units, bars
-        # rounding 오차로 인해 bar_units가 남을 수 있으므로 rest로 마감한다.
+    def flush_bar() -> None:
+        nonlocal bar_tokens, bar_units, bar_idx, printed_ts, printed_bpm
+        if bar_idx >= len(bars_info):
+            return
+        bs, be, num, den, bpm, measure_units_target = bars_info[bar_idx]
         while bar_units < measure_units_target - 1e-6:
             remaining = measure_units_target - bar_units
             if remaining >= 1.0 - 1e-6:
@@ -778,13 +1260,34 @@ def _midi_to_alphatex(midi_path: Path, title: str) -> str:
                 bar_units += 0.5
             else:
                 break
-        if bar_tokens:
-            first = bar_tokens[0]
-            if not first.lstrip().startswith(":"):
-                bar_tokens[0] = f":{base_den} {first}"
-            bars.append(f"{' '.join(bar_tokens)} |")
+        if not bar_tokens:
+            bar_idx += 1
+            return
+        first = bar_tokens[0]
+        if not first.lstrip().startswith(":"):
+            bar_tokens[0] = f":{base_den} {first}"
+        ch_lbl = bar_chords[bar_idx] if bar_idx < len(bar_chords) else ""
+        if ch_lbl:
+            bar_tokens[0] = _merge_chord_into_beat_token(bar_tokens[0], ch_lbl)
+        meta_parts: list[str] = []
+        if (num, den) != printed_ts:
+            meta_parts.append(f"\\ts ({num} {den})")
+            printed_ts = (num, den)
+        if abs(float(bpm) - float(printed_bpm)) > 0.51:
+            meta_parts.append(f"\\tempo {int(round(bpm))}")
+            printed_bpm = float(bpm)
+        if not suppress_mid_bar_midi_tempo:
+            for tt, bpm_ev in tempo_segments:
+                if bs + eps < tt < be - eps:
+                    ratio = (tt - bs) / max(1e-9, (be - bs))
+                    ratio = min(0.9999, max(0.0001, ratio))
+                    bpm_clamped = max(20.0, min(300.0, float(bpm_ev)))
+                    meta_parts.append(f'\\tempo ({int(round(bpm_clamped))} "" {ratio:.4f} hide)')
+        prefix = (" ".join(meta_parts) + " ") if meta_parts else ""
+        bars.append(f"{prefix}{' '.join(bar_tokens)} |")
         bar_tokens = []
         bar_units = 0.0
+        bar_idx += 1
 
     for idx in range(len(sorted_boundaries) - 1):
         t0 = float(sorted_boundaries[idx])
@@ -792,15 +1295,35 @@ def _midi_to_alphatex(midi_path: Path, title: str) -> str:
         if t1 <= t0 + eps:
             continue
 
+        while bar_idx < len(bars_info) and t0 >= bars_info[bar_idx][1] - eps:
+            if bar_tokens:
+                flush_bar()
+            else:
+                bar_idx += 1
+
+        if bar_idx >= len(bars_info):
+            break
+
+        bs, be, num, den, bpm, measure_units_target = bars_info[bar_idx]
+        base_unit_sec = (60.0 / max(20.0, bpm)) / 4.0
+
         duration_sec = max(0.0, t1 - t0)
         den_value = duration_seconds_to_den(duration_sec, base_unit_sec)
         seg_units = 16 / max(1, den_value)
 
-        # bar 경계에서 강제 마감
         if bar_units + seg_units > measure_units_target + 1e-6 and bar_tokens:
-            push_bar()
+            flush_bar()
+            if bar_idx >= len(bars_info):
+                break
+            bs, be, num, den, bpm, measure_units_target = bars_info[bar_idx]
+            base_unit_sec = (60.0 / max(20.0, bpm)) / 4.0
 
-        content = active_content(t0)
+        if bar_units + seg_units > measure_units_target + 1e-6:
+            seg_units = max(0.0, measure_units_target - bar_units)
+            if seg_units <= 1e-9:
+                continue
+
+        content, prev_dy = active_content_with_dy(t0, prev_dy)
         if den_value != base_den:
             beat_token = f":{den_value} {content}"
         else:
@@ -810,22 +1333,37 @@ def _midi_to_alphatex(midi_path: Path, title: str) -> str:
         bar_units += seg_units
 
     if bar_tokens:
-        push_bar()
+        flush_bar()
 
     body = "\n".join(bars) if bars else f":{base_den} r |"
 
-    tex = (
+    sync_block = ""
+    if bars_info:
+        lines: list[str] = []
+        cap_ms: int | None = None
+        if audio_duration_sec is not None and audio_duration_sec > 0:
+            cap_ms = int(round(float(audio_duration_sec) * 1000.0))
+        for i, (bs, _be, _n, _d, _b, _u) in enumerate(bars_info):
+            ms = int(round(bs * 1000.0))
+            if cap_ms is not None:
+                ms = min(ms, cap_ms)
+            lines.append(f"\\sync {i} 0 {ms}")
+        sync_block = "\n" + "\n".join(lines)
+
+    # \\lyrics 는 \\staff 직후에 두어 스태프 컨텍스트에서 가사가 박에 분배되도록 한다 (alphaTex 문서 권장 순서에 맞춤).
+    header = (
         f"\\title \"{safe_title}\"\n"
-        "\\artist \"\"\n"
-        "\\track \"Guitar\" { instrument \"Acoustic Guitar Steel\" }\n"
+        + (f"\\artist \"{safe_artist}\"\n" if safe_artist else "\\artist \"\"\n")
+        + f'\\track "Guitar" {{ instrument "{inst_name}" }}\n'
         "\\staff {score tabs}\n"
-        "\\ts (4 4)\n"
+        + lyrics_line
+        + f"\\ts ({first_ts[0]} {first_ts[1]})\n"
         "\\tuning (E4 B3 G3 D3 A2 E2)\n"
-        f"\\tempo {int(round(tempo))}\n"
-        + body
+        + f"\\tempo {int(round(first_bpm))}\n"
     )
 
-    # alphaTex 진단: 오류가 있으면 UI 렌더 실패가 아니라 backend에서 차단한다.
+    tex = header + body + sync_block
+
     attempt = 0
     last_diag: dict[str, Any] | None = None
     while attempt < 2:
@@ -837,18 +1375,18 @@ def _midi_to_alphatex(midi_path: Path, title: str) -> str:
             return tex
 
         if attempt == 0 and _should_retry_after_alphatex_diagnostics(diag):
-            # title 문자열 이스케이프를 더 엄격하게 정리해 재시도한다.
             safe_title = _escape_alpha_tex_string(title)
-            tex = (
+            header = (
                 f"\\title \"{safe_title}\"\n"
-                "\\artist \"\"\n"
-                "\\track \"Guitar\" { instrument \"Acoustic Guitar Steel\" }\n"
+                + (f"\\artist \"{safe_artist}\"\n" if safe_artist else "\\artist \"\"\n")
+                + f'\\track "Guitar" {{ instrument "{inst_name}" }}\n'
                 "\\staff {score tabs}\n"
-                "\\ts (4 4)\n"
+                + lyrics_line
+                + f"\\ts ({first_ts[0]} {first_ts[1]})\n"
                 "\\tuning (E4 B3 G3 D3 A2 E2)\n"
-                f"\\tempo {int(round(tempo))}\n"
-                + body
+                + f"\\tempo {int(round(first_bpm))}\n"
             )
+            tex = header + body + sync_block
         attempt += 1
 
     assert last_diag is not None
@@ -869,24 +1407,43 @@ def _midi_to_alphatex(midi_path: Path, title: str) -> str:
     )
 
 
-def _midi_to_score(midi_path: Path, title: str) -> dict[str, Any]:
+def _midi_to_score(
+    midi_path: Path,
+    title: str,
+    *,
+    artist: str = "",
+    lyrics: str | None = None,
+    capo: int = 0,
+    tempo_override: float | None = None,
+) -> dict[str, Any]:
     midi = pretty_midi.PrettyMIDI(str(midi_path))
-    tempo = 120.0
-    _times, tempi = midi.get_tempo_changes()
-    if len(tempi) > 0:
-        tempo = float(tempi[0])
+    tempo_segments = _parse_tempo_segments(midi)
+    ts_segments = _parse_time_signature_segments(midi)
+    tempo = float(tempo_override) if tempo_override is not None else float(tempo_segments[0][1])
+    tempo = max(20.0, min(300.0, tempo))
+    ts0 = ts_segments[0]
+    num, den = int(ts0[1]), int(ts0[2])
 
     beats, _grid_step_sec = _quantized_beats_from_midi(midi, tempo)
+
+    raw_notes = _raw_guitar_notes_from_midi(midi)
+    max_end = max((n["end"] for n in raw_notes), default=0.0)
+    max_end = max(max_end, 0.01)
+    bars_info = _compute_bars_info(midi, max_end, bpm_override=tempo_override)
+    chord_labels = _bar_chord_labels(raw_notes, bars_info, int(capo))
 
     return {
         "version": 1,
         "meta": {
             "title": title,
+            "artist": artist,
+            "lyrics": lyrics,
             "tempo": int(round(tempo)),
-            "timeSignature": {"numerator": 4, "denominator": 4},
+            "timeSignature": {"numerator": num, "denominator": den},
             "key": "C major",
-            "capo": 0,
-            "chords": [],
+            "capo": int(capo),
+            "chords": chord_labels,
+            "instrument": _midi_program_to_alphatab_instrument(_get_primary_midi_program(midi)),
         },
         "tracks": [
             {
@@ -910,13 +1467,56 @@ def run_four_step_pipeline(
         if progress_cb:
             progress_cb({"type": "progress", "progress": progress, "stage": stage, "detail": detail})
 
-    title, artist, lyrics = _fetch_youtube_meta(url)
+    title, artist, description, duration_youtube, uploader = _fetch_youtube_meta(url)
+    parsed_artist, parsed_track = parse_artist_and_track_from_youtube_title(title)
+    score_title = f"{parsed_artist} - {parsed_track}" if (parsed_artist and parsed_track) else title
+    if artist and str(artist).strip():
+        display_artist = str(artist).strip()
+    elif parsed_artist:
+        display_artist = parsed_artist.strip()
+    else:
+        display_artist = (uploader or "").strip()
+
+    lyrics_cache_root = Path("data") / "lyrics_cache"
+    lyrics: str | None = None
+    lyrics_source: str = "none"
+
     base_name = _safe_job_name_from_title(title, url)
     job_dir = _allocate_job_dir(Path("data") / "jobs", base_name)
     (job_dir / "audio").mkdir(parents=True, exist_ok=True)
 
     report(5, "download", "yt-dlp로 mp3 다운로드 시작")
     mp3_path = _download_mp3(url, job_dir / "audio")
+    audio_dur = _probe_audio_duration_sec(mp3_path)
+    lyrics, lyrics_source = _resolve_youtube_lyrics(
+        title,
+        artist,
+        uploader,
+        description,
+        duration_youtube,
+        audio_dur,
+        lyrics_cache_root,
+    )
+    if lyrics and lyrics.strip():
+        report(10, "lyrics", f"가사 수집 완료 ({lyrics_source})")
+    else:
+        report(10, "lyrics", "가사 없음 (LRCLIB·설명에서 찾지 못함)")
+
+    capo_guess = _guess_capo_from_text(title, lyrics)
+
+    report(18, "beat", "풀 믹스에서 BPM·박 시각 추정(librosa)")
+    beat_meta = analyze_beats_from_mix_mp3(mp3_path)
+    detected_bpm: float | None = None
+    beat_times_out: list[float] = []
+    downbeat_indices_out: list[int] = []
+    if beat_meta.get("ok") and beat_meta.get("bpm") is not None:
+        detected_bpm = float(beat_meta["bpm"])
+        beat_times_out = list(beat_meta.get("beat_times_sec") or [])
+        downbeat_indices_out = list(beat_meta.get("downbeat_indices") or [])
+        report(20, "beat", f"BPM≈{detected_bpm:.1f}, 박 {len(beat_times_out)}개")
+    else:
+        err = beat_meta.get("error") or "unknown"
+        report(20, "beat", f"박 추정 실패·MIDI 템포 사용 ({err})")
 
     report(30, "separate", "Demucs로 stem 분리 시작")
     stems = _separate_demucs(mp3_path, job_dir / "stems")
@@ -928,20 +1528,87 @@ def run_four_step_pipeline(
     report(60, "basic-pitch", "Basic Pitch로 MIDI 변환 시작")
     midi_path = _basic_pitch_to_midi(guitar_audio, job_dir / "midi" / "guitar.mid")
 
+    if detected_bpm is not None:
+        try:
+            midi_adjust = pretty_midi.PrettyMIDI(str(midi_path))
+            snap_midi_notes_to_sixteenth_grid(midi_adjust, detected_bpm, beat_times_out)
+            midi_adjust.write(str(midi_path))
+        except Exception as exc:
+            report(65, "beat", f"MIDI 스냅 실패(템포만 반영): {exc}")
+
     report(85, "alphatex", "MIDI를 AlphaTex 문법으로 변환 시작")
-    alphatex = _midi_to_alphatex(midi_path, title=title)
-    score = _midi_to_score(midi_path, title=title)
+    alphatex = _midi_to_alphatex(
+        midi_path,
+        title=score_title,
+        artist=display_artist,
+        lyrics=lyrics,
+        audio_duration_sec=audio_dur,
+        capo=capo_guess,
+        tempo_override=detected_bpm,
+    )
+    score = _midi_to_score(
+        midi_path,
+        title=score_title,
+        artist=display_artist,
+        lyrics=lyrics,
+        capo=capo_guess,
+        tempo_override=detected_bpm,
+    )
     (job_dir / "tab").mkdir(parents=True, exist_ok=True)
     (job_dir / "tab" / "guitar.alphatex").write_text(alphatex, encoding="utf-8")
     (job_dir / "tab" / "score.json").write_text(json.dumps(score, ensure_ascii=False, indent=2), encoding="utf-8")
+    meta_payload = {
+        "title": score_title,
+        "youtube_title": title,
+        "artist": display_artist,
+        "lyrics": lyrics,
+        "lyrics_source": lyrics_source,
+        "duration_youtube_sec": duration_youtube,
+        "duration_audio_sec": audio_dur,
+    }
+    (job_dir / "meta.json").write_text(json.dumps(meta_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    job_meta_payload = {
+        "bpm": detected_bpm,
+        "beat_times_sec": beat_times_out if detected_bpm is not None else [],
+        "downbeat_indices": downbeat_indices_out if detected_bpm is not None else [],
+        "beat_analysis_ok": bool(beat_meta.get("ok")),
+        "beat_analysis_raw": {k: v for k, v in beat_meta.items() if k != "error"},
+    }
+    if beat_meta.get("error"):
+        job_meta_payload["beat_analysis_error"] = beat_meta["error"]
+    (job_dir / "job_meta.json").write_text(json.dumps(job_meta_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    lyrics_truncated, lyrics_alphatex_chars = (
+        _alphatex_lyrics_truncation_info(lyrics.strip())
+        if lyrics and lyrics.strip()
+        else (False, 0)
+    )
+    lyrics_files_info = _write_lyrics_files(
+        job_dir,
+        lyrics,
+        lyrics_source,
+        alphatex_truncated=lyrics_truncated,
+        alphatex_lyrics_chars=lyrics_alphatex_chars,
+    )
+    midi_chk = pretty_midi.PrettyMIDI(str(midi_path))
     (job_dir / "tab" / "summary.json").write_text(
         json.dumps(
             {
                 "url": url,
                 "mp3_path": str(mp3_path),
+                "audio_duration_sec": audio_dur,
+                "capo_guess": capo_guess,
+                "lyrics_source": lyrics_source,
+                "lyrics_files": lyrics_files_info,
+                "midi_has_named_chord_track_hint": _midi_has_named_chord_track_hint(midi_chk),
+                "midi_note_events_only": True,
+                "chords_on_score": "마디별 음높이로 추정(표기용). Basic Pitch MIDI에는 코드 문자열이 들어가지 않음.",
                 "stems": {k: str(v) for k, v in stems.items()},
                 "midi_path": str(midi_path),
                 "alphatex_path": str(job_dir / "tab" / "guitar.alphatex"),
+                "job_meta_path": str(job_dir / "job_meta.json"),
+                "audio_bpm": detected_bpm,
+                "beat_times_count": len(beat_times_out) if detected_bpm is not None else 0,
             },
             ensure_ascii=False,
             indent=2,
@@ -957,7 +1624,8 @@ def run_four_step_pipeline(
         midi_path=midi_path,
         alphatex=alphatex,
         score=score,
-        title=title,
-        artist=artist or "",
+        title=score_title,
+        artist=display_artist,
         lyrics=lyrics,
+        lyrics_source=lyrics_source,
     )
