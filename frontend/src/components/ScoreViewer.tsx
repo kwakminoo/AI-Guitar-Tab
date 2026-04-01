@@ -6,6 +6,41 @@ import { createEmptyEditableScore } from "@/lib/emptyAlphatabScore";
 
 export type { AlphaTabScore } from "@/types/alphatabScore";
 
+const TEST_SCORE_TITLE = "너드커넥션-좋은 밤 좋은 꿈";
+
+const DEFAULT_TEST_ALPHATEX = [
+  `\\title "${TEST_SCORE_TITLE}"`,
+  '\\tempo 65',
+  '\\ts (4 4)',
+  `\\track "${TEST_SCORE_TITLE}"`,
+  '\\staff {score tabs}',
+  '\\chord ("C" 0 1 0 2 3 x)',
+  '\\chord ("E" 0 0 1 2 2 0)',
+  '\\chord ("Am" 0 1 2 2 0 x)',
+  '\\chord ("F" 1 1 2 3 3 1)',
+  '\\chord ("Fm7" 1 1 1 3 3 1)',
+  '\\capo 2',
+  ':8',
+  '3.5{ch "C"} 2.4 0.3 2.2 0.4 2.3 2.2 0.3 |',
+  '0.6{ch "E"} 2.5 2.4 1.3 0.4 2.3 2.2 0.3 |',
+  '0.5{ch "Am"} 2.4 2.3 1.2 0.1 2.2 2.3 0.2 |',
+  '1.6{ch "F"} 3.5 3.4 2.3 1.2 3.3 3.4 1.3 |',
+  '1.6{ch "Fm7"} 3.5 3.4 1.3 1.2 3.3 3.4 1.3 |',
+  '3.5{ch "C"} 0.4 2.3 0.2 (0.1 1.2 0.3 2.4 3.5) r r |',
+  '3.5{ch "C"} 2.4 0.3 2.2 0.4 2.3 2.2 0.3 |',
+  '0.6{ch "E"} 2.5 2.4 1.3 0.4 2.3 2.2 0.3 |',
+  '0.5{ch "Am"} 2.4 2.3 1.2 0.1 2.2 2.3 0.2 |',
+  '1.6{ch "F"} 3.5 3.4 2.3 1.2 3.3 3.4 1.3 |',
+  '1.6{ch "Fm7"} 3.5 3.4 1.3 1.2 3.3 3.4 1.3 |',
+  '3.5{ch "C"} 0.4 2.3 0.2 (0.1 1.2 0.3 2.4 3.5) r r |',
+  '3.5{ch "C"} 2.4 0.3 2.2 0.4 2.3 2.2 0.3 |',
+  '0.6{ch "E"} 2.5 2.4 1.3 0.4 2.3 2.2 0.3 |',
+  '0.5{ch "Am"} 2.4 2.3 1.2 0.1 2.2 2.3 0.2 |',
+  '1.6{ch "F"} 3.5 3.4 2.3 1.2 3.3 3.4 1.3 |',
+  '1.6{ch "Fm7"} 3.5 3.4 1.3 1.2 3.3 3.4 1.3 |',
+  '3.5{ch "C"} 0.4 2.3 0.2 (0.1 1.2 0.3 2.4 3.5) 0.4 2.3 2.2 0.3 |',
+].join(" ");
+
 function IconPlay({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden>
@@ -125,6 +160,11 @@ type AlphaTabModuleLike = {
   synth: {
     PlayerState: {
       Playing: unknown;
+    };
+  };
+  importer?: {
+    ScoreLoader?: {
+      loadScoreFromBytes?: (data: Uint8Array, settings?: unknown) => unknown;
     };
   };
   midi?: {
@@ -256,6 +296,8 @@ type AlphaTabApiLike = {
   updateSettings: () => void;
   render: () => void;
   tex: (tex: string) => void;
+  load?: (scoreData: unknown, trackIndexes?: number[]) => boolean;
+  renderScore?: (score: unknown, trackIndexes?: number[]) => void;
   print: (width?: string, additionalSettings?: unknown) => void;
   scrollToCursor?: () => void;
   playPause: () => void;
@@ -319,6 +361,13 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
   const [midiPreviewName, setMidiPreviewName] = useState<string | null>(null);
   const [midiPreviewError, setMidiPreviewError] = useState<string | null>(null);
   const [isMidiPreviewLoading, setIsMidiPreviewLoading] = useState(false);
+  const [musicXmlPreviewName, setMusicXmlPreviewName] = useState<string | null>(null);
+  const [musicXmlPreviewError, setMusicXmlPreviewError] = useState<string | null>(null);
+  const [isMusicXmlPreviewLoading, setIsMusicXmlPreviewLoading] = useState(false);
+  const [musicXmlPreviewData, setMusicXmlPreviewData] = useState<{
+    fileName: string;
+    bytes: Uint8Array;
+  } | null>(null);
   const [activeBeatText, setActiveBeatText] = useState<string>("대기 중");
   const [selectionState, setSelectionState] = useState<string>("선택 없음");
   const [hoveredNoteText, setHoveredNoteText] = useState<string>("노트 정보 없음");
@@ -336,8 +385,9 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
   const [playerStateText, setPlayerStateText] = useState("정지");
   const [outputDevices, setOutputDevices] = useState<Array<{ id?: string; label?: string }>>([]);
   const [selectedOutputDeviceId, setSelectedOutputDeviceId] = useState("default");
-  /** 가사 박스만 / 타브 악보만 (가사가 있을 때만 의미 있음) */
-  const [scorePanelMode, setScorePanelMode] = useState<"lyrics" | "tab">("tab");
+  /** 가사 박스 / 타브 악보 / 테스트 악보 */
+  const [scorePanelMode, setScorePanelMode] = useState<"lyrics" | "tab" | "test">("tab");
+  const [testAlphaTex] = useState<string>(DEFAULT_TEST_ALPHATEX);
   const selectionStartMsRef = useRef<number | null>(null);
   const selectionStartTickRef = useRef<number | null>(null);
   const previousSecondRef = useRef(-1);
@@ -350,17 +400,17 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
   }, [isStudyMode]);
 
   useEffect(() => {
-    if (!songLyrics?.trim()) {
+    if (!songLyrics?.trim() && scorePanelMode === "lyrics") {
       setScorePanelMode("tab");
     }
-  }, [songLyrics]);
+  }, [scorePanelMode, songLyrics]);
 
   const scorePanelInitialTab = useRef(true);
   useEffect(() => {
     scorePanelInitialTab.current = true;
   }, [songLyrics]);
   useEffect(() => {
-    if (scorePanelMode !== "tab") return;
+    if (scorePanelMode === "lyrics") return;
     if (scorePanelInitialTab.current) {
       scorePanelInitialTab.current = false;
       return;
@@ -375,11 +425,10 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
   const hasBackendAlphaTex = Boolean(alphaTex && alphaTex.trim().length > 0);
 
   const normalizedScore = useMemo(
-    () => (hasBackendAlphaTex ? null : normalizeScoreForRendering(workingScore)),
-    [hasBackendAlphaTex, workingScore],
+    () => normalizeScoreForRendering(workingScore),
+    [workingScore],
   );
-  const modelError =
-    !hasBackendAlphaTex && normalizedScore === null ? "악보 데이터 형식이 올바르지 않습니다." : null;
+  const modelError = normalizedScore === null ? "악보 데이터 형식이 올바르지 않습니다." : null;
 
   useEffect(() => {
     if (!mainRef.current) return;
@@ -389,9 +438,23 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
     trackListRef.current?.replaceChildren();
     previousSecondRef.current = -1;
 
-    if (!hasBackendAlphaTex && !normalizedScore) return;
+    if (scorePanelMode !== "test" && !normalizedScore && !hasBackendAlphaTex && !musicXmlPreviewData)
+      return;
 
-    const tex = hasBackendAlphaTex ? (alphaTex as string) : buildAlphaTex(normalizedScore as AlphaTabScore);
+    const lyricsForStaff =
+      songLyrics?.trim() ||
+      (score?.meta && typeof score.meta.lyrics === "string" ? score.meta.lyrics.trim() : "");
+    const tex =
+      scorePanelMode === "test"
+        ? testAlphaTex
+        : musicXmlPreviewData
+          ? null
+          : mergeLyricsIntoAlphaTex(
+              hasBackendAlphaTex
+                ? (alphaTex as string)
+                : buildAlphaTex(normalizedScore as AlphaTabScore),
+              lyricsForStaff || null,
+            );
 
     (async () => {
       const alphaTab = await loadAlphaTabUmd();
@@ -424,7 +487,9 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
       settings.notation.extendBendArrowsOnTiedNotes = true;
       settings.notation.extendLineEffectsToBeatEnd = false;
       settings.notation.slurHeight = 5;
-      settings.notation.rhythmHeight = isStudyMode ? 30 : 25;
+      const hasLyricsForStaff = Boolean(lyricsForStaff);
+      settings.notation.rhythmHeight =
+        hasLyricsForStaff && scorePanelMode === "lyrics" ? 34 : isStudyMode ? 30 : 25;
       settings.notation.transpositionPitches = [0];
       settings.notation.displayTranspositionPitches = [0];
       if (alphaTab.NotationMode?.GuitarPro !== undefined) {
@@ -820,7 +885,23 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
       requestAnimationFrame(() => {
         try {
           setRenderError(null);
-          api.tex(tex);
+          if (scorePanelMode !== "test" && musicXmlPreviewData) {
+            const parsedScore = alphaTab.importer?.ScoreLoader?.loadScoreFromBytes?.(
+              musicXmlPreviewData.bytes,
+              settings,
+            );
+            if (!parsedScore || !api.renderScore) {
+              const loaded = api.load?.(musicXmlPreviewData.bytes);
+              if (!loaded) {
+                throw new Error("MusicXML 파일 로딩에 실패했습니다. 파일 형식을 확인해 주세요.");
+              }
+              return;
+            }
+            coerceScoreToGuitarTab(parsedScore);
+            api.renderScore(parsedScore, [-1]);
+            return;
+          }
+          api.tex(tex ?? "");
         } catch (e) {
           const msg = e instanceof Error ? e.message : "AlphaTab 렌더 실패";
           setRenderError(msg);
@@ -839,7 +920,21 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
       apiRef.current?.destroy();
       apiRef.current = null;
     };
-  }, [allowSeekByClick, isStudyMode, layout, normalizedScore, speedTrainerEnabled, zoom, alphaTex, hasBackendAlphaTex]);
+  }, [
+    allowSeekByClick,
+    isStudyMode,
+    layout,
+    normalizedScore,
+    speedTrainerEnabled,
+    zoom,
+    alphaTex,
+    hasBackendAlphaTex,
+    musicXmlPreviewData,
+    songLyrics,
+    scorePanelMode,
+    score,
+    testAlphaTex,
+  ]);
 
   const handlePlayPause = () => {
     const canPlay = isPlayerReady && (apiRef.current?.isReadyForPlayback ?? true);
@@ -955,6 +1050,48 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
     }
   };
 
+  const handleMusicXmlFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0] ?? null;
+    event.target.value = "";
+    if (!file) return;
+
+    const lowerName = file.name.toLowerCase();
+    const isMusicXml =
+      file.type === "application/xml" ||
+      file.type === "text/xml" ||
+      lowerName.endsWith(".musicxml") ||
+      lowerName.endsWith(".xml") ||
+      lowerName.endsWith(".mxl");
+    if (!isMusicXml) {
+      setMusicXmlPreviewError("MusicXML 파일(.musicxml, .xml, .mxl)만 업로드할 수 있습니다.");
+      return;
+    }
+
+    try {
+      setIsMusicXmlPreviewLoading(true);
+      setMusicXmlPreviewError(null);
+      const arrayBuffer = await file.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuffer);
+      if (bytes.length === 0) {
+        throw new Error("빈 파일은 불러올 수 없습니다.");
+      }
+      setScorePanelMode("tab");
+      setMusicXmlPreviewData({ fileName: file.name, bytes });
+      setMusicXmlPreviewName(file.name);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "MusicXML 로드 중 오류가 발생했습니다.";
+      setMusicXmlPreviewError(message);
+    } finally {
+      setIsMusicXmlPreviewLoading(false);
+    }
+  };
+
+  const displayTitle =
+    scorePanelMode === "test"
+      ? TEST_SCORE_TITLE
+      : musicXmlPreviewData?.fileName
+        ? fileNameToTitle(musicXmlPreviewData.fileName)
+        : (songTitle ?? "").trim();
   const artistText = (songArtist ?? "").trim();
 
   return (
@@ -1015,6 +1152,25 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
                 <p className="text-[11px] leading-snug text-red-600">{midiPreviewError}</p>
               ) : null}
             </div>
+            <div className="mt-3 space-y-1 rounded-lg border border-zinc-200 bg-white p-2">
+              <p className="text-[11px] font-semibold text-zinc-700">MusicXML 미리보기</p>
+              <input
+                type="file"
+                accept=".musicxml,.xml,.mxl,application/xml,text/xml"
+                onChange={handleMusicXmlFileChange}
+                disabled={isMusicXmlPreviewLoading}
+                className="w-full text-[11px] text-zinc-700 file:mr-2 file:rounded-md file:border file:border-zinc-300 file:bg-zinc-100 file:px-2 file:py-1 file:text-[11px] file:font-medium file:text-zinc-700 hover:file:bg-zinc-200"
+              />
+              {isMusicXmlPreviewLoading ? (
+                <p className="text-[11px] leading-snug text-zinc-600">MusicXML을 로드 중입니다...</p>
+              ) : null}
+              {musicXmlPreviewName ? (
+                <p className="text-[11px] leading-snug text-zinc-600">로드됨: {musicXmlPreviewName}</p>
+              ) : null}
+              {musicXmlPreviewError ? (
+                <p className="text-[11px] leading-snug text-red-600">{musicXmlPreviewError}</p>
+              ) : null}
+            </div>
           </div>
 
           <div className="flex min-h-0 flex-1 flex-col px-3 pt-3">
@@ -1047,6 +1203,11 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
                   {abRangeMs !== null ? ` · AB ${formatDurationMs(abRangeMs)}` : ""}
                 </p>
                 <div className="w-full space-y-0.5 text-center">
+                  {displayTitle ? (
+                    <p className="truncate text-xs font-semibold text-zinc-700" title={displayTitle}>
+                      {displayTitle}
+                    </p>
+                  ) : null}
                   {artistText ? (
                     <p className="truncate text-xs text-zinc-500" title={artistText}>
                       {artistText}
@@ -1314,12 +1475,12 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
               악보 렌더링 오류: {modelError ?? renderError}
             </div>
           )}
-          {songLyrics?.trim() ? (
-            <div
-              className="mx-auto mb-3 flex w-full max-w-[1100px] flex-wrap items-center gap-2"
-              role="tablist"
-              aria-label="악보 보기 전환"
-            >
+          <div
+            className="mx-auto mb-3 flex w-full max-w-[1100px] flex-wrap items-center gap-2"
+            role="tablist"
+            aria-label="악보 보기 전환"
+          >
+            {songLyrics?.trim() ? (
               <button
                 type="button"
                 role="tab"
@@ -1335,23 +1496,38 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
               >
                 가사악보
               </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={scorePanelMode === "tab"}
-                aria-controls="score-panel-tab"
-                id="tab-tab"
-                onClick={() => setScorePanelMode("tab")}
-                className={`rounded-lg border px-3 py-2 text-xs font-medium transition ${
-                  scorePanelMode === "tab"
-                    ? "border-zinc-900 bg-zinc-900 text-white"
-                    : "border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50"
-                }`}
-              >
-                타브악보
-              </button>
-            </div>
-          ) : null}
+            ) : null}
+            <button
+              type="button"
+              role="tab"
+              aria-selected={scorePanelMode === "tab"}
+              aria-controls="score-panel-tab"
+              id="tab-tab"
+              onClick={() => setScorePanelMode("tab")}
+              className={`rounded-lg border px-3 py-2 text-xs font-medium transition ${
+                scorePanelMode === "tab"
+                  ? "border-zinc-900 bg-zinc-900 text-white"
+                  : "border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50"
+              }`}
+            >
+              타브악보
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={scorePanelMode === "test"}
+              aria-controls="score-panel-test"
+              id="tab-test"
+              onClick={() => setScorePanelMode("test")}
+              className={`rounded-lg border px-3 py-2 text-xs font-medium transition ${
+                scorePanelMode === "test"
+                  ? "border-zinc-900 bg-zinc-900 text-white"
+                  : "border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50"
+              }`}
+            >
+              테스트 악보
+            </button>
+          </div>
           {songLyrics?.trim() && scorePanelMode === "lyrics" ? (
             <section
               id="score-panel-lyrics"
@@ -1371,11 +1547,19 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
             role={songLyrics?.trim() ? "tabpanel" : undefined}
             aria-labelledby={songLyrics?.trim() ? "tab-tab" : undefined}
             className={
-              songLyrics?.trim() && scorePanelMode === "lyrics"
+              scorePanelMode === "lyrics"
                 ? "hidden"
                 : "mx-auto min-h-full w-full max-w-[1100px]"
             }
           >
+            {scorePanelMode === "test" ? (
+              <p
+                id="score-panel-test"
+                className="mb-2 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-600"
+              >
+                테스트 악보 탭은 실험/학습 데이터 제작용 임시 악보를 렌더합니다.
+              </p>
+            ) : null}
             <div ref={mainRef} className="min-h-full w-full" />
           </div>
         </div>
@@ -1562,6 +1746,35 @@ function escapeTexLyrics(input: string): string {
     .replaceAll('"', '\\"');
 }
 
+/**
+ * 백엔드 alphaTex에 \\lyrics 가 빠졌거나, score-only 경로에서 meta.lyrics 를 확실히 반영할 때 사용.
+ * 이미 \\lyrics "..." 가 있으면 그대로 둔다.
+ */
+function mergeLyricsIntoAlphaTex(tex: string, lyrics: string | null | undefined): string {
+  const raw = typeof lyrics === "string" ? lyrics.trim() : "";
+  if (!raw) return tex;
+  if (/\\lyrics\s+"/i.test(tex)) return tex;
+
+  const escaped = escapeTexLyrics(raw);
+  if (!escaped) return tex;
+
+  const inject = `\\lyrics "${escaped}"\n`;
+
+  const staffMatch = /(\\staff\s*\{[^}]*\}\s*)/i.exec(tex);
+  if (staffMatch && typeof staffMatch.index === "number") {
+    const end = staffMatch.index + staffMatch[0].length;
+    return tex.slice(0, end) + inject + tex.slice(end);
+  }
+
+  const trackMatch = /(\\track\s+"[^"]*"\s*\{[^}]*\}\s*)/i.exec(tex);
+  if (trackMatch && typeof trackMatch.index === "number") {
+    const end = trackMatch.index + trackMatch[0].length;
+    return `${tex.slice(0, end)}\n${inject}${tex.slice(end)}`;
+  }
+
+  return `${inject}${tex}`;
+}
+
 function sanitizeBeatText(input: string | null | undefined): string | null {
   if (!input) return null;
   const cleaned = input
@@ -1578,6 +1791,101 @@ function formatDurationMs(milliseconds: number): string {
   const minutes = (seconds / 60) | 0;
   seconds = (seconds - minutes * 60) | 0;
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function fileNameToTitle(fileName: string): string {
+  const noExt = fileName.replace(/\.[^./\\]+$/u, "");
+  return noExt.trim() || fileName.trim();
+}
+
+function coerceScoreToGuitarTab(score: unknown): void {
+  if (!score || typeof score !== "object") return;
+  const s = score as {
+    tracks?: Array<{
+      name?: string;
+      staves?: Array<{
+        isPercussion?: boolean;
+        showTablature?: boolean;
+        showStandardNotation?: boolean;
+        stringTuning?: { tunings?: number[]; name?: string; isStandard?: boolean };
+        bars?: Array<{
+          voices?: Array<{
+            beats?: Array<{
+              notes?: Array<{
+                string?: number;
+                fret?: number;
+                octave?: number;
+                tone?: number;
+              }>;
+            }>;
+          }>;
+        }>;
+      }>;
+    }>;
+  };
+  const tracks = s.tracks ?? [];
+  const guitarTuningsTopToBottom = [64, 59, 55, 50, 45, 40];
+
+  for (const track of tracks) {
+    if (!track.name?.trim()) {
+      track.name = "Guitar";
+    }
+    for (const staff of track.staves ?? []) {
+      staff.isPercussion = false;
+      staff.showTablature = true;
+      staff.showStandardNotation = false;
+      if (!staff.stringTuning) staff.stringTuning = { tunings: [] };
+      staff.stringTuning.tunings = [...guitarTuningsTopToBottom];
+      staff.stringTuning.name = "Guitar Standard";
+      staff.stringTuning.isStandard = true;
+
+      for (const bar of staff.bars ?? []) {
+        for (const voice of bar.voices ?? []) {
+          for (const beat of voice.beats ?? []) {
+            for (const note of beat.notes ?? []) {
+              if (typeof note.string === "number" && note.string >= 1 && typeof note.fret === "number" && note.fret >= 0) {
+                continue;
+              }
+              const midi =
+                typeof note.octave === "number" && typeof note.tone === "number"
+                  ? note.octave * 12 + note.tone
+                  : null;
+              if (midi === null || !Number.isFinite(midi)) continue;
+              const mapped = mapMidiToGuitarPosition(midi);
+              if (!mapped) continue;
+              note.string = mapped.string;
+              note.fret = mapped.fret;
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+function mapMidiToGuitarPosition(inputMidi: number): { string: number; fret: number } | null {
+  // string 1 = 저음 E2(40), string 6 = 고음 E4(64)
+  const lowToHighOpen = [40, 45, 50, 55, 59, 64];
+  let midi = Math.round(inputMidi);
+  const minMidi = lowToHighOpen[0];
+  const maxMidi = lowToHighOpen[lowToHighOpen.length - 1] + 24;
+  while (midi < minMidi) midi += 12;
+  while (midi > maxMidi) midi -= 12;
+
+  let best: { string: number; fret: number; score: number } | null = null;
+  for (let i = 0; i < lowToHighOpen.length; i++) {
+    const open = lowToHighOpen[i];
+    const fret = midi - open;
+    if (fret < 0 || fret > 24) continue;
+    const string = i + 1;
+    const comfort = Math.abs(fret - 5);
+    const score = fret + comfort * 0.25 + (6 - string) * 0.01;
+    if (!best || score < best.score) {
+      best = { string, fret, score };
+    }
+  }
+  if (!best) return null;
+  return { string: best.string, fret: best.fret };
 }
 
 function getBeatPlaybackMs(beat: unknown): number | null {

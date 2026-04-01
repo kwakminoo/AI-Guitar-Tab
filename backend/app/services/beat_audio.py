@@ -100,3 +100,75 @@ def snap_midi_notes_to_sixteenth_grid(
             dur = max(1e-3, float(note.end) - float(note.start))
             note.start = new_start
             note.end = new_start + dur
+
+
+def analyze_onsets_from_guitar_audio(
+    audio_path: Path,
+    *,
+    max_duration_sec: float = 600.0,
+    bpm_hint: float | None = None,
+) -> dict[str, Any]:
+    """
+    기타 stem 오디오에서 onset 시각(초)을 추출한다.
+    반환: ok, onset_times_sec, sr, error(optional)
+    """
+    out: dict[str, Any] = {
+        "ok": False,
+        "onset_times_sec": [],
+        "sr": None,
+        "error": None,
+    }
+    try:
+        import librosa
+    except ImportError as e:
+        out["error"] = f"librosa_import:{e}"
+        return out
+
+    path = Path(audio_path)
+    if not path.is_file():
+        out["error"] = "file_not_found"
+        return out
+
+    try:
+        y, sr = librosa.load(
+            str(path),
+            sr=22050,
+            mono=True,
+            duration=max_duration_sec,
+        )
+    except Exception as e:
+        out["error"] = f"load:{e}"
+        return out
+
+    if y.size < sr * 0.5:
+        out["error"] = "audio_too_short"
+        return out
+
+    try:
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=512)
+        onset_frames = librosa.onset.onset_detect(
+            onset_envelope=onset_env,
+            sr=sr,
+            hop_length=512,
+            units="frames",
+            backtrack=False,
+            pre_max=20,
+            post_max=20,
+            pre_avg=100,
+            post_avg=100,
+            delta=0.2,
+            wait=1,
+        )
+        onset_times = librosa.frames_to_time(onset_frames, sr=sr, hop_length=512)
+        onset_times_sec = sorted(set(round(float(t), 6) for t in np.atleast_1d(onset_times).tolist()))
+        if len(onset_times_sec) < 2:
+            out["error"] = "onsets_too_few"
+            return out
+        out["ok"] = True
+        out["onset_times_sec"] = onset_times_sec
+        out["sr"] = int(sr)
+    except Exception as e:
+        out["error"] = f"onset_detect:{e}"
+        return out
+
+    return out

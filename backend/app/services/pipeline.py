@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import bisect
 import json
 import os
 import re
@@ -16,13 +17,18 @@ from typing import Any, Callable
 
 import pretty_midi
 
-from .beat_audio import analyze_beats_from_mix_mp3, snap_midi_notes_to_sixteenth_grid
+from .beat_audio import analyze_beats_from_mix_mp3, analyze_onsets_from_guitar_audio, snap_midi_notes_to_sixteenth_grid
 from .lyrics_lrclib import fetch_lyrics_from_lrclib, parse_artist_and_track_from_youtube_title
 
 GUITAR_OPEN_MIDI = [64, 59, 55, 50, 45, 40]  # E4, B3, G3, D3, A2, E2
 GUITAR_MIN_PITCH = 40
 GUITAR_MAX_PITCH = 88
 MIN_NOTE_VELOCITY = 18
+ONSET_TOLERANCE_SEC = 0.045
+MERGE_MIN_IOI_SEC = 0.070
+SUSTAIN_RELEASE_SEC = 0.090
+MAX_SUSTAIN_BEATS = 2.0
+MAX_NOTES_PER_SLOT = 3
 
 # General MIDI program → alphaTab instrument 이름 (Structural Metadata 문서와 동일 계열)
 _GM_PROGRAM_TO_ALPHATAB: dict[int, str] = {
@@ -253,12 +259,104 @@ def _description_fallback_lyrics(description: str | None) -> str | None:
     first_paragraph = description.split("\n\n", 1)[0].strip()
     if len(first_paragraph) < 8:
         return None
+    # 제목/크레딧 한 줄만 있는 설명은 가사로 보지 않는다.
+    if "\n" not in first_paragraph and len(first_paragraph) < 80:
+        return None
     if re.match(r"^https?://", first_paragraph.strip()):
+        return None
+    # "가수 - 곡명 [가사/Lyrics]" 같은 헤더 문구는 제외
+    if re.search(r"(?:\[\s*가사\s*/\s*lyrics?\s*\]|lyrics?)", first_paragraph, flags=re.I):
         return None
     return first_paragraph[:800]
 
 
+def _vtt_to_plain_lyrics(vtt_text: str) -> str:
+    """WEBVTT 자막 텍스트를 순수 가사 라인으로 정리."""
+    lines: list[str] = []
+    prev = ""
+    for raw in (vtt_text or "").replace("\r\n", "\n").split("\n"):
+        s = raw.strip()
+        if not s:
+            continue
+        if s.upper().startswith("WEBVTT"):
+            continue
+        if s.startswith("NOTE"):
+            continue
+        if "-->" in s:
+            continue
+        if re.match(r"^\d+$", s):
+            continue
+        s = re.sub(r"<[^>]+>", "", s).strip()
+        if not s:
+            continue
+        if re.match(r"^(kind|language)\s*:", s, flags=re.I):
+            continue
+        # 배경음/효과음 표식 제거
+        if re.match(r"^\[(?:음악|music|applause|laughs?|sfx).*\]$", s, flags=re.I):
+            continue
+        if s in {"♪", "♬"}:
+            continue
+        if s == prev:
+            continue
+        lines.append(s)
+        prev = s
+    return "\n".join(lines).strip()
+
+
+def _youtube_subtitle_fallback_lyrics(url: str, out_dir: Path) -> str | None:
+    """
+    yt-dlp 자막(ko-orig/ko)에서 가사 추출.
+    일부 언어 다운로드 실패가 있어도 --ignore-errors로 가능한 파일만 활용한다.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_tpl = out_dir / "%(id)s.%(ext)s"
+    cmd = [
+        sys.executable,
+        "-m",
+        "yt_dlp",
+        "--skip-download",
+        "--write-auto-subs",
+        "--write-subs",
+        "--sub-langs",
+        "ko-orig,ko",
+        "--sub-format",
+        "vtt",
+        "--ignore-errors",
+        "--no-warnings",
+        "--output",
+        str(output_tpl),
+        url,
+    ]
+    subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=180,
+        check=False,
+    )
+    candidates = sorted(out_dir.glob("*.ko-orig.vtt"), reverse=True) + sorted(
+        out_dir.glob("*.ko.vtt"), reverse=True
+    )
+    for p in candidates:
+        try:
+            text = _vtt_to_plain_lyrics(p.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            continue
+        if not text:
+            continue
+        # 너무 짧은 경우(제목/잡음) 제외
+        if len(text) < 24:
+            continue
+        return text
+    return None
+
+
 def _resolve_youtube_lyrics(
+    url: str,
+    job_dir: Path,
     title: str,
     artist: str | None,
     uploader: str | None,
@@ -284,6 +382,10 @@ def _resolve_youtube_lyrics(
             )
             if text2 and text2.strip():
                 return text2.strip(), src2
+
+    yt_sub = _youtube_subtitle_fallback_lyrics(url, job_dir / "lyrics_subs")
+    if yt_sub and yt_sub.strip():
+        return yt_sub.strip(), "youtube_subtitles"
 
     fb = _description_fallback_lyrics(description)
     if fb:
@@ -894,7 +996,99 @@ def _position_transition_cost(prev: tuple[int, int], nxt: tuple[int, int]) -> fl
     return float(cost)
 
 
-def _quantized_beats_from_midi(midi: pretty_midi.PrettyMIDI, tempo: float) -> tuple[list[dict[str, Any]], float]:
+def _nearest_onset_distance_sec(onset_times: list[float], t: float) -> float:
+    if not onset_times:
+        return float("inf")
+    i = bisect.bisect_left(onset_times, t)
+    d = float("inf")
+    if i < len(onset_times):
+        d = min(d, abs(onset_times[i] - t))
+    if i > 0:
+        d = min(d, abs(onset_times[i - 1] - t))
+    return d
+
+
+def _next_onset_after(onset_times: list[float], t: float) -> float | None:
+    if not onset_times:
+        return None
+    i = bisect.bisect_right(onset_times, t)
+    if i < len(onset_times):
+        return onset_times[i]
+    return None
+
+
+def _reduce_note_density_with_onsets(
+    raw_notes: list[dict[str, Any]],
+    *,
+    onset_times_sec: list[float] | None,
+    quarter_sec: float,
+) -> list[dict[str, Any]]:
+    if not raw_notes:
+        return raw_notes
+
+    onset_times = sorted(float(t) for t in (onset_times_sec or []) if t is not None)
+
+    # 3-A: onset 근접 노트 우선 유지
+    if onset_times:
+        gated: list[dict[str, Any]] = []
+        for n in raw_notes:
+            d = _nearest_onset_distance_sec(onset_times, float(n["start"]))
+            # onset에서 멀고 velocity가 약한 노트는 잔향/환상음으로 간주해 제거
+            if d <= ONSET_TOLERANCE_SEC or int(n["velocity"]) >= (MIN_NOTE_VELOCITY + 8):
+                gated.append(n)
+        if gated:
+            raw_notes = gated
+
+    # 3-B: 동일 pitch의 과도한 촘촘 onset 병합
+    min_ioi = max(MERGE_MIN_IOI_SEC, quarter_sec / 8.0)  # 대략 1/32 하한
+    by_pitch: dict[int, list[dict[str, Any]]] = {}
+    for n in raw_notes:
+        by_pitch.setdefault(int(n["pitch"]), []).append(n)
+
+    merged: list[dict[str, Any]] = []
+    for pitch, arr in by_pitch.items():
+        arr_sorted = sorted(arr, key=lambda x: (float(x["start"]), float(x["end"])))
+        cur = dict(arr_sorted[0])
+        for nxt in arr_sorted[1:]:
+            gap = float(nxt["start"]) - float(cur["end"])
+            # 겹치거나 너무 가까우면 같은 발음으로 취급
+            if gap <= min_ioi:
+                cur["end"] = max(float(cur["end"]), float(nxt["end"]))
+                cur["velocity"] = max(int(cur["velocity"]), int(nxt["velocity"]))
+            else:
+                merged.append(cur)
+                cur = dict(nxt)
+        merged.append(cur)
+
+    # 3-D: 지속 길이 상한 (다음 onset 직전 또는 최대 N박)
+    clamped: list[dict[str, Any]] = []
+    max_sustain_sec = quarter_sec * MAX_SUSTAIN_BEATS
+    for n in sorted(merged, key=lambda x: (float(x["start"]), int(x["pitch"]))):
+        start = float(n["start"])
+        end = float(n["end"])
+        next_onset = _next_onset_after(onset_times, start + 1e-6) if onset_times else None
+        cap1 = start + max_sustain_sec
+        cap2 = (next_onset + SUSTAIN_RELEASE_SEC) if next_onset is not None else cap1
+        new_end = min(end, cap1, cap2)
+        if new_end <= start + 1e-3:
+            continue
+        clamped.append(
+            {
+                "pitch": int(n["pitch"]),
+                "velocity": int(n["velocity"]),
+                "start": start,
+                "end": new_end,
+            }
+        )
+    return clamped if clamped else raw_notes
+
+
+def _quantized_beats_from_midi(
+    midi: pretty_midi.PrettyMIDI,
+    tempo: float,
+    *,
+    onset_times_sec: list[float] | None = None,
+) -> tuple[list[dict[str, Any]], float]:
     """
     MIDI note start/end를 1/16 단위로 기본 양자화하고,
     필요할 경우 1/32 단위까지 적응적으로 사용한다.
@@ -926,6 +1120,12 @@ def _quantized_beats_from_midi(midi: pretty_midi.PrettyMIDI, tempo: float) -> tu
                     "end": float(note.end),
                 }
             )
+
+    candidate_raw_notes = _reduce_note_density_with_onsets(
+        candidate_raw_notes,
+        onset_times_sec=onset_times_sec,
+        quarter_sec=quarter,
+    )
 
     if not candidate_raw_notes:
         # 파서가 무조건 구조를 기대하므로 더미 비트 1개는 남긴다.
@@ -1081,7 +1281,7 @@ def _quantized_beats_from_midi(midi: pretty_midi.PrettyMIDI, tempo: float) -> tu
                 }
             )
 
-        # 같은 slot에서 중복 줄 제거 + 최대 4음 제한
+        # 같은 slot에서 중복 줄 제거 + 최대 음수 제한
         by_string: dict[int, dict[str, Any]] = {}
         for mn in mapped_notes:
             existing = by_string.get(mn["string"])
@@ -1091,7 +1291,9 @@ def _quantized_beats_from_midi(midi: pretty_midi.PrettyMIDI, tempo: float) -> tu
             if (mn["velocity"], -mn["fret"]) > (existing["velocity"], -existing["fret"]):
                 by_string[mn["string"]] = mn
 
-        normalized_notes = sorted(by_string.values(), key=lambda x: (x["string"], x["fret"]))[:4]
+        normalized_notes = sorted(by_string.values(), key=lambda x: (x["string"], x["fret"]))[
+            :MAX_NOTES_PER_SLOT
+        ]
         beats.append(
             {
                 "time": time_value,
@@ -1115,6 +1317,7 @@ def _midi_to_alphatex(
     audio_duration_sec: float | None = None,
     capo: int = 0,
     tempo_override: float | None = None,
+    onset_times_sec: list[float] | None = None,
 ) -> str:
     midi = pretty_midi.PrettyMIDI(str(midi_path))
     tempo_segments = _parse_tempo_segments(midi)
@@ -1130,7 +1333,7 @@ def _midi_to_alphatex(
 
     inst_name = _midi_program_to_alphatab_instrument(_get_primary_midi_program(midi))
 
-    beats, _grid_step_sec = _quantized_beats_from_midi(midi, tempo0)
+    beats, _grid_step_sec = _quantized_beats_from_midi(midi, tempo0, onset_times_sec=onset_times_sec)
     beats = sorted(beats, key=lambda b: float(b.get("time", 0.0)))
 
     suppress_mid_bar_midi_tempo = tempo_override is not None
@@ -1415,6 +1618,7 @@ def _midi_to_score(
     lyrics: str | None = None,
     capo: int = 0,
     tempo_override: float | None = None,
+    onset_times_sec: list[float] | None = None,
 ) -> dict[str, Any]:
     midi = pretty_midi.PrettyMIDI(str(midi_path))
     tempo_segments = _parse_tempo_segments(midi)
@@ -1424,7 +1628,7 @@ def _midi_to_score(
     ts0 = ts_segments[0]
     num, den = int(ts0[1]), int(ts0[2])
 
-    beats, _grid_step_sec = _quantized_beats_from_midi(midi, tempo)
+    beats, _grid_step_sec = _quantized_beats_from_midi(midi, tempo, onset_times_sec=onset_times_sec)
 
     raw_notes = _raw_guitar_notes_from_midi(midi)
     max_end = max((n["end"] for n in raw_notes), default=0.0)
@@ -1489,6 +1693,8 @@ def run_four_step_pipeline(
     mp3_path = _download_mp3(url, job_dir / "audio")
     audio_dur = _probe_audio_duration_sec(mp3_path)
     lyrics, lyrics_source = _resolve_youtube_lyrics(
+        str(url),
+        job_dir,
         title,
         artist,
         uploader,
@@ -1525,6 +1731,15 @@ def run_four_step_pipeline(
     if not guitar_audio:
         raise RuntimeError("Demucs 출력에서 guitar/other stem을 찾지 못했습니다.")
 
+    report(45, "onset", "기타 stem onset 추출(음 과다 표기 완화)")
+    onset_meta = analyze_onsets_from_guitar_audio(guitar_audio, bpm_hint=detected_bpm)
+    onset_times_out: list[float] = []
+    if onset_meta.get("ok"):
+        onset_times_out = list(onset_meta.get("onset_times_sec") or [])
+        report(50, "onset", f"onset {len(onset_times_out)}개 추출")
+    else:
+        report(50, "onset", f"onset 추출 실패·기본 후처리 사용 ({onset_meta.get('error') or 'unknown'})")
+
     report(60, "basic-pitch", "Basic Pitch로 MIDI 변환 시작")
     midi_path = _basic_pitch_to_midi(guitar_audio, job_dir / "midi" / "guitar.mid")
 
@@ -1545,6 +1760,7 @@ def run_four_step_pipeline(
         audio_duration_sec=audio_dur,
         capo=capo_guess,
         tempo_override=detected_bpm,
+        onset_times_sec=onset_times_out,
     )
     score = _midi_to_score(
         midi_path,
@@ -1553,6 +1769,7 @@ def run_four_step_pipeline(
         lyrics=lyrics,
         capo=capo_guess,
         tempo_override=detected_bpm,
+        onset_times_sec=onset_times_out,
     )
     (job_dir / "tab").mkdir(parents=True, exist_ok=True)
     (job_dir / "tab" / "guitar.alphatex").write_text(alphatex, encoding="utf-8")
@@ -1574,9 +1791,13 @@ def run_four_step_pipeline(
         "downbeat_indices": downbeat_indices_out if detected_bpm is not None else [],
         "beat_analysis_ok": bool(beat_meta.get("ok")),
         "beat_analysis_raw": {k: v for k, v in beat_meta.items() if k != "error"},
+        "onset_analysis_ok": bool(onset_meta.get("ok")),
+        "onset_times_sec": onset_times_out,
     }
     if beat_meta.get("error"):
         job_meta_payload["beat_analysis_error"] = beat_meta["error"]
+    if onset_meta.get("error"):
+        job_meta_payload["onset_analysis_error"] = onset_meta["error"]
     (job_dir / "job_meta.json").write_text(json.dumps(job_meta_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     lyrics_truncated, lyrics_alphatex_chars = (
         _alphatex_lyrics_truncation_info(lyrics.strip())

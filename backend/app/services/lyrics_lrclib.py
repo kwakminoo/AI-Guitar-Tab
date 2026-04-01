@@ -44,7 +44,10 @@ def parse_artist_and_track_from_youtube_title(title: str) -> tuple[str | None, s
     t = (title or "").strip()
     if not t:
         return None, None
-    t = re.sub(r"\s*/\s*가사\s*$", "", t, flags=re.I).strip()
+    # 제목 말미의 [가사/Lyrics], (Official Video) 같은 꼬리표 제거
+    t = re.sub(r"\[[^\]]*(?:가사|lyrics?|lyric)[^\]]*\]", " ", t, flags=re.I).strip()
+    t = re.sub(r"\([^)]*(?:official|mv|m/v|audio|ver\.?|version|가사|lyrics?)?[^)]*\)$", " ", t, flags=re.I).strip()
+    t = re.sub(r"\s*/\s*(?:가사|lyrics?)\s*$", "", t, flags=re.I).strip()
     first = t.split("/")[0].strip()
     if " - " not in first:
         return None, None
@@ -63,6 +66,8 @@ def normalize_title_for_search(title: str) -> str:
     t = (title or "").strip()
     if not t:
         return ""
+    # [가사/Lyrics], [Official], [Audio] 등 설명성 꼬리표 제거
+    t = re.sub(r"\[[^\]]*(?:가사|lyrics?|lyric|official|audio|mv|m/v|live)\s*[^\]]*\]", " ", t, flags=re.I)
     # 반복적으로 (…) 세그먼트 제거 — 너무 짧아지면 중단
     prev = None
     for _ in range(12):
@@ -70,6 +75,8 @@ def normalize_title_for_search(title: str) -> str:
         t = re.sub(r"\s*\([^)]{0,200}\)\s*", " ", t).strip()
         if t == prev:
             break
+    # 끝에 남은 슬래시 구분자 이후 가사 꼬리표 제거
+    t = re.sub(r"\s*/\s*(?:가사|lyrics?)\s*$", "", t, flags=re.I).strip()
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
@@ -130,9 +137,10 @@ def fetch_lyrics_from_lrclib(
     artist_q = normalize_artist_for_search(artist, uploader)
     title_norm = normalize_title_for_search(title)
 
-    # 메타에 아티스트가 없을 때: 제목의 '가수 - 곡명'을 우선 (업로더가 음반사인 경우가 많음)
-    if parsed_artist and parsed_track and not (artist and artist.strip()):
-        artist_q = parsed_artist
+    # 제목에서 "가수 - 곡명" 파싱이 되면 곡명 기반 검색 후보를 강화한다.
+    if parsed_artist and parsed_track:
+        if not (artist and artist.strip()):
+            artist_q = parsed_artist
         title_norm = normalize_title_for_search(parsed_track)
 
     if not title_norm or not artist_q:
@@ -154,6 +162,10 @@ def fetch_lyrics_from_lrclib(
     params_list: list[dict[str, str]] = [
         {"track_name": title_norm, "artist_name": artist_q},
     ]
+    if parsed_track:
+        parsed_track_norm = normalize_title_for_search(parsed_track)
+        if parsed_track_norm and parsed_track_norm != title_norm:
+            params_list.append({"track_name": parsed_track_norm, "artist_name": artist_q})
     # 짧은 제목 후보 (한글 곡명만 남은 경우 등)
     short = re.sub(r"^[^\s]+\s+", "", title_norm, count=1).strip()
     if short and short != title_norm and len(short) >= 2:
