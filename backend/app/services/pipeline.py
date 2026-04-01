@@ -1513,7 +1513,7 @@ def run_four_step_pipeline(
         detected_bpm = float(beat_meta["bpm"])
         beat_times_out = list(beat_meta.get("beat_times_sec") or [])
         downbeat_indices_out = list(beat_meta.get("downbeat_indices") or [])
-        report(20, "beat", f"BPM≈{detected_bpm:.1f}, 박 {len(beat_times_out)}개")
+        report(20, "beat", f"BPM~{detected_bpm:.1f}, {len(beat_times_out)} beats")
     else:
         err = beat_meta.get("error") or "unknown"
         report(20, "beat", f"박 추정 실패·MIDI 템포 사용 ({err})")
