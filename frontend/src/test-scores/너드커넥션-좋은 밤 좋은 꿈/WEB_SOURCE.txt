@@ -1,0 +1,11 @@
+테스트 악보 탭의 소스 경로·파일명은 한 곳에서만 바꿉니다:
+frontend/src/lib/testScoreConfig.ts
+
+현재 기본 악보: Ave Maria (src/test-scores/Ave-Marria/ave-maria.atex)
+
+Next.js API: GET /api/test-score/current
+(개발 서버가 testScoreConfig에 지정된 src 파일을 읽습니다. 저장 후 브라우저 새로고침.)
+
+API 실패 시 폴백: frontend/public/test-scores/<testScoreConfig의 파일명>
+
+이 폴더의 good-night-good-dream.atex 는 예시 보관용이며, 테스트 탭 기본 로드 대상은 아닙니다.

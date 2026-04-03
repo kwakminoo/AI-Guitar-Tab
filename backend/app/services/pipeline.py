@@ -4,6 +4,7 @@ import hashlib
 import bisect
 import json
 import os
+import shutil
 import re
 import subprocess
 import sys
@@ -942,9 +943,36 @@ def _separate_demucs(mp3_path: Path, out_dir: Path) -> dict[str, Path]:
     for name in ("vocals", "drums", "bass", "other", "guitar", "piano"):
         matched = list(track_dir.glob(f"{name}.*"))
         if matched:
-            stems[name] = matched[0]
+            # 외부에서 job_dir/stems/만 봐도 바로 알 수 있게 루트로 복사한다.
+            dest = out_dir / f"{name}.mp3"
+            try:
+                if matched[0].resolve() != dest.resolve():
+                    shutil.copy2(matched[0], dest)
+            except OSError as exc:
+                raise RuntimeError(f"Demucs stem({name})을 {dest} 로 복사하지 못했습니다: {exc}") from exc
+            stems[name] = dest
     # guitar/piano가 없는 모델에서도 최소 stems 반환
     return stems
+
+
+def _ensure_flat_guitar_stem_mp3(stems: dict[str, Path], stems_root: Path) -> Path:
+    """
+    Demucs htdemucs는 보통 vocals/drums/bass/other 만 내보내고 파일명 `guitar`는 없다.
+    Basic Pitch·onset에 쓰는 트랙(other 또는 일부 모델의 guitar)을 `stems/guitar.mp3`로 복사해
+    작업 폴더에서 분리 기타 음원을 바로 찾을 수 있게 한다.
+    """
+    src = stems.get("guitar") or stems.get("other")
+    if not src or not src.is_file():
+        raise RuntimeError("Demucs 출력에서 guitar/other stem을 찾지 못했습니다.")
+    stems_root.mkdir(parents=True, exist_ok=True)
+    dest = stems_root / "guitar.mp3"
+    try:
+        if src.resolve() != dest.resolve():
+            shutil.copy2(src, dest)
+    except OSError as exc:
+        raise RuntimeError(f"기타 stem을 stems/guitar.mp3 로 복사하지 못했습니다: {exc}") from exc
+    stems["guitar"] = dest
+    return dest
 
 
 def _basic_pitch_to_midi(guitar_audio: Path, midi_out: Path) -> Path:
@@ -1726,10 +1754,7 @@ def run_four_step_pipeline(
 
     report(30, "separate", "Demucs로 stem 분리 시작")
     stems = _separate_demucs(mp3_path, job_dir / "stems")
-
-    guitar_audio = stems.get("guitar") or stems.get("other")
-    if not guitar_audio:
-        raise RuntimeError("Demucs 출력에서 guitar/other stem을 찾지 못했습니다.")
+    guitar_audio = _ensure_flat_guitar_stem_mp3(stems, job_dir / "stems")
 
     report(45, "onset", "기타 stem onset 추출(음 과다 표기 완화)")
     onset_meta = analyze_onsets_from_guitar_audio(guitar_audio, bpm_hint=detected_bpm)
@@ -1824,6 +1849,7 @@ def run_four_step_pipeline(
                 "midi_has_named_chord_track_hint": _midi_has_named_chord_track_hint(midi_chk),
                 "midi_note_events_only": True,
                 "chords_on_score": "마디별 음높이로 추정(표기용). Basic Pitch MIDI에는 코드 문자열이 들어가지 않음.",
+                "guitar_stem_mp3": str(job_dir / "stems" / "guitar.mp3"),
                 "stems": {k: str(v) for k, v in stems.items()},
                 "midi_path": str(midi_path),
                 "alphatex_path": str(job_dir / "tab" / "guitar.alphatex"),

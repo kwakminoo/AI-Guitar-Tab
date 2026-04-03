@@ -3,42 +3,26 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { AlphaTabBeat, AlphaTabNote, AlphaTabScore } from "@/types/alphatabScore";
 import { createEmptyEditableScore } from "@/lib/emptyAlphatabScore";
+import {
+  TEST_SCORE_API_PATH,
+  TEST_SCORE_DISPLAY_TITLE,
+  TEST_SCORE_PUBLIC_FALLBACK_URL,
+  TEST_SCORE_PUBLIC_FILE,
+  TEST_SCORE_REL_PATH,
+} from "@/lib/testScoreConfig";
 
 export type { AlphaTabScore } from "@/types/alphatabScore";
 
-const TEST_SCORE_TITLE = "너드커넥션-좋은 밤 좋은 꿈";
+/** 개발 시 src의 .atex 를 서버가 읽어 반환 (저장 후 새로고침 시 최신 반영). 실패 시 public 정적 파일로 폴백. */
+const TEST_SCORE_API_URL = TEST_SCORE_API_PATH;
 
-const DEFAULT_TEST_ALPHATEX = [
-  `\\title "${TEST_SCORE_TITLE}"`,
-  '\\tempo 65',
-  '\\ts (4 4)',
-  `\\track "${TEST_SCORE_TITLE}"`,
-  '\\staff {score tabs}',
-  '\\chord ("C" 0 1 0 2 3 x)',
-  '\\chord ("E" 0 0 1 2 2 0)',
-  '\\chord ("Am" 0 1 2 2 0 x)',
-  '\\chord ("F" 1 1 2 3 3 1)',
-  '\\chord ("Fm7" 1 1 1 3 3 1)',
-  '\\capo 2',
-  ':8',
-  '3.5{ch "C"} 2.4 0.3 2.2 0.4 2.3 2.2 0.3 |',
-  '0.6{ch "E"} 2.5 2.4 1.3 0.4 2.3 2.2 0.3 |',
-  '0.5{ch "Am"} 2.4 2.3 1.2 0.1 2.2 2.3 0.2 |',
-  '1.6{ch "F"} 3.5 3.4 2.3 1.2 3.3 3.4 1.3 |',
-  '1.6{ch "Fm7"} 3.5 3.4 1.3 1.2 3.3 3.4 1.3 |',
-  '3.5{ch "C"} 0.4 2.3 0.2 (0.1 1.2 0.3 2.4 3.5) r r |',
-  '3.5{ch "C"} 2.4 0.3 2.2 0.4 2.3 2.2 0.3 |',
-  '0.6{ch "E"} 2.5 2.4 1.3 0.4 2.3 2.2 0.3 |',
-  '0.5{ch "Am"} 2.4 2.3 1.2 0.1 2.2 2.3 0.2 |',
-  '1.6{ch "F"} 3.5 3.4 2.3 1.2 3.3 3.4 1.3 |',
-  '1.6{ch "Fm7"} 3.5 3.4 1.3 1.2 3.3 3.4 1.3 |',
-  '3.5{ch "C"} 0.4 2.3 0.2 (0.1 1.2 0.3 2.4 3.5) r r |',
-  '3.5{ch "C"} 2.4 0.3 2.2 0.4 2.3 2.2 0.3 |',
-  '0.6{ch "E"} 2.5 2.4 1.3 0.4 2.3 2.2 0.3 |',
-  '0.5{ch "Am"} 2.4 2.3 1.2 0.1 2.2 2.3 0.2 |',
-  '1.6{ch "F"} 3.5 3.4 2.3 1.2 3.3 3.4 1.3 |',
-  '1.6{ch "Fm7"} 3.5 3.4 1.3 1.2 3.3 3.4 1.3 |',
-  '3.5{ch "C"} 0.4 2.3 0.2 (0.1 1.2 0.3 2.4 3.5) 0.4 2.3 2.2 0.3 |',
+const FALLBACK_TEST_ALPHATEX = [
+  `\\title "${TEST_SCORE_DISPLAY_TITLE}"`,
+  "\\tempo 72",
+  "\\ts (6 8)",
+  `\\track "${TEST_SCORE_DISPLAY_TITLE}"`,
+  "\\staff {score tabs}",
+  ":8 r |",
 ].join(" ");
 
 function IconPlay({ className }: { className?: string }) {
@@ -149,7 +133,10 @@ type AlphaTabModuleLike = {
     Page: unknown;
   };
   ScrollMode?: {
+    Off?: unknown;
     Continuous?: unknown;
+    OffScreen?: unknown;
+    Smooth?: unknown;
   };
   TabRhythmMode?: {
     Automatic?: unknown;
@@ -387,7 +374,8 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
   const [selectedOutputDeviceId, setSelectedOutputDeviceId] = useState("default");
   /** 가사 박스 / 타브 악보 / 테스트 악보 */
   const [scorePanelMode, setScorePanelMode] = useState<"lyrics" | "tab" | "test">("tab");
-  const [testAlphaTex] = useState<string>(DEFAULT_TEST_ALPHATEX);
+  const [testAlphaTex, setTestAlphaTex] = useState<string>(FALLBACK_TEST_ALPHATEX);
+  const [testScoreLoadError, setTestScoreLoadError] = useState<string | null>(null);
   const selectionStartMsRef = useRef<number | null>(null);
   const selectionStartTickRef = useRef<number | null>(null);
   const previousSecondRef = useRef(-1);
@@ -420,6 +408,44 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
     }, 50);
     return () => window.clearTimeout(id);
   }, [scorePanelMode]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const load = async () => {
+      const bust = `t=${Date.now()}`;
+      const tryFetch = async (url: string) => {
+        const res = await fetch(`${url}?${bust}`, { cache: "no-store" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.text();
+      };
+
+      try {
+        let text: string;
+        try {
+          text = await tryFetch(TEST_SCORE_API_URL);
+        } catch {
+          text = await tryFetch(TEST_SCORE_PUBLIC_FALLBACK_URL);
+        }
+        const trimmed = text.trim();
+        if (!cancelled && trimmed.length > 0) {
+          setTestAlphaTex(trimmed);
+          setTestScoreLoadError(null);
+        }
+      } catch {
+        if (!cancelled) {
+          setTestScoreLoadError(
+            `테스트 악보를 불러오지 못했습니다. src/${TEST_SCORE_REL_PATH} 또는 public/test-scores/${TEST_SCORE_PUBLIC_FILE} 를 확인하세요.`,
+          );
+        }
+      }
+    };
+
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const workingScore = score ?? nullBaseline;
   const hasBackendAlphaTex = Boolean(alphaTex && alphaTex.trim().length > 0);
@@ -514,9 +540,12 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
       settings.player.enableAnimatedBeatCursor = true;
       settings.player.enableUserInteraction = allowSeekByClick;
       settings.player.bufferTimeInMilliseconds = isStudyMode ? 460 : 380;
+      // 재생 시 스크롤: alphaTab PlayerSettings.scrollMode + 기본 IScrollHandler
+      // (vendor/alphatab PlayerSettings.ScrollMode, ScrollHandlers.ts)
+      // OffScreen: 현재 마디/시스템이 뷰포트 밖으로 나갈 때만 세로 스크롤 → 재생 위치가 보이도록 유지
       settings.player.nativeBrowserSmoothScroll = !isStudyMode;
-      if (alphaTab.ScrollMode?.Continuous !== undefined) {
-        settings.player.scrollMode = alphaTab.ScrollMode.Continuous;
+      if (alphaTab.ScrollMode?.OffScreen !== undefined) {
+        settings.player.scrollMode = alphaTab.ScrollMode.OffScreen;
       }
       settings.player.scrollOffsetX = 0;
       settings.player.scrollOffsetY = isStudyMode ? -24 : -12;
@@ -566,12 +595,7 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
           transitionBeatCursor: () => {},
         };
       }
-      if ("customScrollHandler" in api) {
-        api.customScrollHandler = {
-          forceScrollTo: () => {},
-          onBeatCursorUpdating: () => {},
-        };
-      }
+      // customScrollHandler를 비우면 재생 스크롤이 막힌다. 기본 VerticalOffScreenScrollHandler 등을 쓴다.
 
       const createTrackItem = (track: { index: number; name: string }) => {
         const item = document.createElement("button");
@@ -1088,7 +1112,7 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
 
   const displayTitle =
     scorePanelMode === "test"
-      ? TEST_SCORE_TITLE
+      ? TEST_SCORE_DISPLAY_TITLE
       : musicXmlPreviewData?.fileName
         ? fileNameToTitle(musicXmlPreviewData.fileName)
         : (songTitle ?? "").trim();
@@ -1557,7 +1581,15 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
                 id="score-panel-test"
                 className="mb-2 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-600"
               >
-                테스트 악보 탭은 실험/학습 데이터 제작용 임시 악보를 렌더합니다.
+                테스트 악보 탭은 실험/학습용 소스를 렌더합니다. 편집·경로 전환은{" "}
+                <code className="rounded bg-zinc-200 px-1">src/lib/testScoreConfig.ts</code>와{" "}
+                <code className="rounded bg-zinc-200 px-1">src/{TEST_SCORE_REL_PATH}</code> —
+                파일 저장 후 페이지를 새로고침(F5)하면 개발 서버가 디스크에서 다시 읽어 반영됩니다. API
+                실패 시 <code className="rounded bg-zinc-200 px-1">public/test-scores/{TEST_SCORE_PUBLIC_FILE}</code>{" "}
+                폴백을 씁니다.
+                {testScoreLoadError ? (
+                  <span className="mt-1 block text-red-600">{testScoreLoadError}</span>
+                ) : null}
               </p>
             ) : null}
             <div ref={mainRef} className="min-h-full w-full" />
