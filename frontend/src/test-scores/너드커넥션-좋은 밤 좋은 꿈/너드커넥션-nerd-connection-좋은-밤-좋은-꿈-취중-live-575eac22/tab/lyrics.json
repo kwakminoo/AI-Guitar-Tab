@@ -1,0 +1,12 @@
+{
+  "source": "lrclib_cache",
+  "char_count": 377,
+  "encoding": "utf-8",
+  "alphatex_lyrics_chars": 377,
+  "alphatex_lyrics_truncated": false,
+  "files": {
+    "plain_root": "data/jobs/너드커넥션-nerd-connection-좋은-밤-좋은-꿈-취중-live-575eac22/lyrics.txt",
+    "plain_next_to_alphatex": "data/jobs/너드커넥션-nerd-connection-좋은-밤-좋은-꿈-취중-live-575eac22/tab/lyrics.txt"
+  },
+  "alphatex_note": "guitar.alphatex 헤더의 \\\\lyrics 에 동일 가사가 들어가며, alphaTab이 박마다 음절을 배치한다. 문법: https://alphatab.net/docs/alphatex/metadata/staff/lyrics"
+}

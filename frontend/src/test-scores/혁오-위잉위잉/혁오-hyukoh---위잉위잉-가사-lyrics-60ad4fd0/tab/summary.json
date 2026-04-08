@@ -1,0 +1,55 @@
+{
+  "url": "https://www.youtube.com/watch?v=GIa80KLuDwc",
+  "mp3_path": "data\\jobs\\혁오-hyukoh---위잉위잉-가사-lyrics-60ad4fd0\\audio\\source.mp3",
+  "audio_duration_sec": 193.770542,
+  "capo_guess": 0,
+  "lyrics_source": "lrclib",
+  "lyrics_files": {
+    "saved": true,
+    "paths": {
+      "lyrics_txt": "data\\jobs\\혁오-hyukoh---위잉위잉-가사-lyrics-60ad4fd0\\lyrics.txt",
+      "tab_lyrics_txt": "data\\jobs\\혁오-hyukoh---위잉위잉-가사-lyrics-60ad4fd0\\tab\\lyrics.txt",
+      "tab_lyrics_json": "data\\jobs\\혁오-hyukoh---위잉위잉-가사-lyrics-60ad4fd0\\tab\\lyrics.json"
+    },
+    "source": "lrclib"
+  },
+  "midi_has_named_chord_track_hint": false,
+  "midi_note_events_only": true,
+  "chords_on_score": "마디별 음높이로 추정(표기용). Basic Pitch MIDI에는 코드 문자열이 들어가지 않음.",
+  "guitar_stem_mp3": "data\\jobs\\혁오-hyukoh---위잉위잉-가사-lyrics-60ad4fd0\\stems\\guitar.mp3",
+  "stems": {
+    "vocals": "data\\jobs\\혁오-hyukoh---위잉위잉-가사-lyrics-60ad4fd0\\stems\\vocals.mp3",
+    "drums": "data\\jobs\\혁오-hyukoh---위잉위잉-가사-lyrics-60ad4fd0\\stems\\drums.mp3",
+    "bass": "data\\jobs\\혁오-hyukoh---위잉위잉-가사-lyrics-60ad4fd0\\stems\\bass.mp3",
+    "other": "data\\jobs\\혁오-hyukoh---위잉위잉-가사-lyrics-60ad4fd0\\stems\\other.mp3",
+    "guitar": "data\\jobs\\혁오-hyukoh---위잉위잉-가사-lyrics-60ad4fd0\\stems\\guitar.mp3"
+  },
+  "midi_path": "data\\jobs\\혁오-hyukoh---위잉위잉-가사-lyrics-60ad4fd0\\midi\\guitar.mid",
+  "midi_by_stem": {
+    "vocals": "data\\jobs\\혁오-hyukoh---위잉위잉-가사-lyrics-60ad4fd0\\midi\\vocals.mid",
+    "bass": "data\\jobs\\혁오-hyukoh---위잉위잉-가사-lyrics-60ad4fd0\\midi\\bass.mid",
+    "other": "data\\jobs\\혁오-hyukoh---위잉위잉-가사-lyrics-60ad4fd0\\midi\\other.mid",
+    "guitar": "data\\jobs\\혁오-hyukoh---위잉위잉-가사-lyrics-60ad4fd0\\midi\\guitar.mid"
+  },
+  "midi_stem_rms": {
+    "vocals": 0.1271694153547287,
+    "drums": 0.07255791872739792,
+    "bass": 0.09491532295942307,
+    "other": 0.11083240807056427
+  },
+  "midi_stem_rms_floor": 0.005086776614189148,
+  "midi_stem_skip_reasons": {
+    "drums": "melody_midi_excluded_instrument"
+  },
+  "melody_midi_stem_allowlist": [
+    "bass",
+    "guitar",
+    "other",
+    "piano",
+    "vocals"
+  ],
+  "alphatex_path": "data\\jobs\\혁오-hyukoh---위잉위잉-가사-lyrics-60ad4fd0\\tab\\guitar.alphatex",
+  "job_meta_path": "data\\jobs\\혁오-hyukoh---위잉위잉-가사-lyrics-60ad4fd0\\job_meta.json",
+  "audio_bpm": 123.046875,
+  "beat_times_count": 392
+}

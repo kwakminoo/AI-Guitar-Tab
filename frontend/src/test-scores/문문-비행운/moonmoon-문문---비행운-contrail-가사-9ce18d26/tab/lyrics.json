@@ -1,0 +1,12 @@
+{
+  "source": "lrclib",
+  "char_count": 435,
+  "encoding": "utf-8",
+  "alphatex_lyrics_chars": 435,
+  "alphatex_lyrics_truncated": false,
+  "files": {
+    "plain_root": "data/jobs/moonmoon-문문---비행운-contrail-가사-9ce18d26/lyrics.txt",
+    "plain_next_to_alphatex": "data/jobs/moonmoon-문문---비행운-contrail-가사-9ce18d26/tab/lyrics.txt"
+  },
+  "alphatex_note": "guitar.alphatex 헤더의 \\\\lyrics 에 동일 가사가 들어가며, alphaTab이 박마다 음절을 배치한다. 문법: https://alphatab.net/docs/alphatex/metadata/staff/lyrics"
+}

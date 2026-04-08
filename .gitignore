@@ -12,6 +12,7 @@ dist/
 # Virtualenv
 .venv/
 backend/.venv311/
+backend/.venv_omnizart/
 venv/
 ENV/
 env/
@@ -19,6 +20,9 @@ env/
 # Environment files
 .env
 .env.*
+
+# Local secrets / session (never commit)
+backend/.cookie
 
 # Logs
 *.log

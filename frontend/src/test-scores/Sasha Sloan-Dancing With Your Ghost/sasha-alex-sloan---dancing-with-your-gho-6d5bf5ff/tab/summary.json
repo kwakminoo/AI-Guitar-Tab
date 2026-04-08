@@ -1,0 +1,55 @@
+{
+  "url": "https://www.youtube.com/watch?v=Qzc_aX8c8g4",
+  "mp3_path": "data\\jobs\\sasha-alex-sloan---dancing-with-your-gho-6d5bf5ff\\audio\\source.mp3",
+  "audio_duration_sec": 199.703229,
+  "capo_guess": 0,
+  "lyrics_source": "lrclib",
+  "lyrics_files": {
+    "saved": true,
+    "paths": {
+      "lyrics_txt": "data\\jobs\\sasha-alex-sloan---dancing-with-your-gho-6d5bf5ff\\lyrics.txt",
+      "tab_lyrics_txt": "data\\jobs\\sasha-alex-sloan---dancing-with-your-gho-6d5bf5ff\\tab\\lyrics.txt",
+      "tab_lyrics_json": "data\\jobs\\sasha-alex-sloan---dancing-with-your-gho-6d5bf5ff\\tab\\lyrics.json"
+    },
+    "source": "lrclib"
+  },
+  "midi_has_named_chord_track_hint": false,
+  "midi_note_events_only": true,
+  "chords_on_score": "마디별 음높이로 추정(표기용). Basic Pitch MIDI에는 코드 문자열이 들어가지 않음.",
+  "guitar_stem_mp3": "data\\jobs\\sasha-alex-sloan---dancing-with-your-gho-6d5bf5ff\\stems\\guitar.mp3",
+  "stems": {
+    "vocals": "data\\jobs\\sasha-alex-sloan---dancing-with-your-gho-6d5bf5ff\\stems\\vocals.mp3",
+    "drums": "data\\jobs\\sasha-alex-sloan---dancing-with-your-gho-6d5bf5ff\\stems\\drums.mp3",
+    "bass": "data\\jobs\\sasha-alex-sloan---dancing-with-your-gho-6d5bf5ff\\stems\\bass.mp3",
+    "other": "data\\jobs\\sasha-alex-sloan---dancing-with-your-gho-6d5bf5ff\\stems\\other.mp3",
+    "guitar": "data\\jobs\\sasha-alex-sloan---dancing-with-your-gho-6d5bf5ff\\stems\\guitar.mp3"
+  },
+  "midi_path": "data\\jobs\\sasha-alex-sloan---dancing-with-your-gho-6d5bf5ff\\midi\\guitar.mid",
+  "midi_by_stem": {
+    "vocals": "data\\jobs\\sasha-alex-sloan---dancing-with-your-gho-6d5bf5ff\\midi\\vocals.mid",
+    "bass": "data\\jobs\\sasha-alex-sloan---dancing-with-your-gho-6d5bf5ff\\midi\\bass.mid",
+    "other": "data\\jobs\\sasha-alex-sloan---dancing-with-your-gho-6d5bf5ff\\midi\\other.mid",
+    "guitar": "data\\jobs\\sasha-alex-sloan---dancing-with-your-gho-6d5bf5ff\\midi\\guitar.mid"
+  },
+  "midi_stem_rms": {
+    "vocals": 0.12585340440273285,
+    "drums": 0.061026573181152344,
+    "bass": 0.11868525296449661,
+    "other": 0.10545513033866882
+  },
+  "midi_stem_rms_floor": 0.0050341361761093145,
+  "midi_stem_skip_reasons": {
+    "drums": "melody_midi_excluded_instrument"
+  },
+  "melody_midi_stem_allowlist": [
+    "bass",
+    "guitar",
+    "other",
+    "piano",
+    "vocals"
+  ],
+  "alphatex_path": "data\\jobs\\sasha-alex-sloan---dancing-with-your-gho-6d5bf5ff\\tab\\guitar.alphatex",
+  "job_meta_path": "data\\jobs\\sasha-alex-sloan---dancing-with-your-gho-6d5bf5ff\\job_meta.json",
+  "audio_bpm": 143.5546875,
+  "beat_times_count": 471
+}

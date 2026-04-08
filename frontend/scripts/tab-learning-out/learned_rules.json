@@ -1,0 +1,152 @@
+{
+  "version": 1,
+  "generatedAt": "2026-04-08T01:23:27.886Z",
+  "pairCount": 8,
+  "perSong": [
+    {
+      "id": "nerd-good-night",
+      "songFolder": "너드커넥션-좋은 밤 좋은 꿈",
+      "refCapo": 2,
+      "genCapo": 0,
+      "refTempo": 120,
+      "genTempo": 123,
+      "barCounts": {
+        "ref": 24,
+        "gen": 133,
+        "midi": 131
+      },
+      "chordBarMatchRate": 0.381,
+      "comparedBars": 21,
+      "dyMarkCountGen": 369,
+      "jobFolder": "src/test-scores/너드커넥션-좋은 밤 좋은 꿈/너드커넥션-nerd-connection-좋은-밤-좋은-꿈-취중-live-575eac22"
+    },
+    {
+      "id": "kwak-confession",
+      "songFolder": "곽진언 - 일종의 고백",
+      "refCapo": 2,
+      "genCapo": 0,
+      "refTempo": 63,
+      "genTempo": 129,
+      "barCounts": {
+        "ref": 9,
+        "gen": 129,
+        "midi": 119
+      },
+      "chordBarMatchRate": 0,
+      "comparedBars": 4,
+      "dyMarkCountGen": 468,
+      "jobFolder": "src/test-scores/곽진언 - 일종의 고백/곽진언---일종의-고백-a-kind-of-confession-나의-해방일-dd887cf5"
+    },
+    {
+      "id": "kim-thirty",
+      "songFolder": "김광석-서른즈음에",
+      "refCapo": 2,
+      "genCapo": 0,
+      "refTempo": 63,
+      "genTempo": 129,
+      "barCounts": {
+        "ref": 12,
+        "gen": 152,
+        "midi": 144
+      },
+      "chordBarMatchRate": 0,
+      "comparedBars": 9,
+      "dyMarkCountGen": 511,
+      "jobFolder": "src/test-scores/김광석-서른즈음에/김광석---서른-즈음에-가사-lyrics-2e93bf80"
+    },
+    {
+      "id": "kim-forget",
+      "songFolder": "김광석-잊어야 한다는 마음으로",
+      "refCapo": 0,
+      "genCapo": 0,
+      "refTempo": 60,
+      "genTempo": 136,
+      "barCounts": {
+        "ref": 8,
+        "gen": 145,
+        "midi": 143
+      },
+      "chordBarMatchRate": 0,
+      "comparedBars": 6,
+      "dyMarkCountGen": 397,
+      "jobFolder": "src/test-scores/김광석-잊어야 한다는 마음으로/김광석---잊어야-한다는-마음으로-가사-lyrics-7931b75e"
+    },
+    {
+      "id": "baek-first-love",
+      "songFolder": "백아-첫사랑",
+      "refCapo": 0,
+      "genCapo": 0,
+      "refTempo": 120,
+      "genTempo": 136,
+      "barCounts": {
+        "ref": 16,
+        "gen": 108,
+        "midi": 101
+      },
+      "chordBarMatchRate": 0.444,
+      "comparedBars": 9,
+      "dyMarkCountGen": 312,
+      "jobFolder": "src/test-scores/백아-첫사랑/백아---첫사랑-가사-lyrics-28d475e7"
+    },
+    {
+      "id": "lee-old-love",
+      "songFolder": "이문세-옛사랑",
+      "refCapo": 0,
+      "genCapo": 0,
+      "refTempo": 120,
+      "genTempo": 129,
+      "barCounts": {
+        "ref": 38,
+        "gen": 154,
+        "midi": 150
+      },
+      "chordBarMatchRate": 0.074,
+      "comparedBars": 27,
+      "dyMarkCountGen": 590,
+      "jobFolder": "src/test-scores/이문세-옛사랑/이문세---옛사랑-가사-lyrics-5a899d8e"
+    },
+    {
+      "id": "moon-contrail",
+      "songFolder": "문문-비행운",
+      "refCapo": 3,
+      "genCapo": 0,
+      "refTempo": 102,
+      "genTempo": 103,
+      "barCounts": {
+        "ref": 25,
+        "gen": 77,
+        "midi": 72
+      },
+      "chordBarMatchRate": 0.048,
+      "comparedBars": 21,
+      "dyMarkCountGen": 275,
+      "jobFolder": "src/test-scores/문문-비행운/moonmoon-문문---비행운-contrail-가사-9ce18d26"
+    },
+    {
+      "id": "hyukoh-wiing",
+      "songFolder": "혁오-위잉위잉",
+      "refCapo": 0,
+      "genCapo": 0,
+      "refTempo": 120,
+      "genTempo": 123,
+      "barCounts": {
+        "ref": 24,
+        "gen": 100,
+        "midi": 98
+      },
+      "chordBarMatchRate": 0.75,
+      "comparedBars": 20,
+      "dyMarkCountGen": 369,
+      "jobFolder": "src/test-scores/혁오-위잉위잉/혁오-hyukoh---위잉위잉-가사-lyrics-60ad4fd0"
+    }
+  ],
+  "aggregate": {
+    "meanChordBarMatchRate": 0.212,
+    "capoMismatchCount": 4,
+    "hints": [
+      "카포: 정답과 생성 capo가 자주 다름 → 제목/가사 외 MIDI·정답 기반 capo 추정 검토",
+      "마디 수: 정답 악보와 생성물 마디 분할(|) 수가 다름 → 리듬 양자화·온셋 스냅 파라미터 검토",
+      "주법: 생성물에 {dy} 다이내믹 표기가 많음 → ref 스타일(생략) 옵션 검토"
+    ]
+  }
+}

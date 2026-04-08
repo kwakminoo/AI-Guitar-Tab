@@ -1,0 +1,55 @@
+{
+  "url": "https://www.youtube.com/watch?v=7DmWaLSQnWc",
+  "mp3_path": "data\\jobs\\곽진언---일종의-고백-a-kind-of-confession-나의-해방일-dd887cf5\\audio\\source.mp3",
+  "audio_duration_sec": 238.039375,
+  "capo_guess": 0,
+  "lyrics_source": "youtube_subtitles",
+  "lyrics_files": {
+    "saved": true,
+    "paths": {
+      "lyrics_txt": "data\\jobs\\곽진언---일종의-고백-a-kind-of-confession-나의-해방일-dd887cf5\\lyrics.txt",
+      "tab_lyrics_txt": "data\\jobs\\곽진언---일종의-고백-a-kind-of-confession-나의-해방일-dd887cf5\\tab\\lyrics.txt",
+      "tab_lyrics_json": "data\\jobs\\곽진언---일종의-고백-a-kind-of-confession-나의-해방일-dd887cf5\\tab\\lyrics.json"
+    },
+    "source": "youtube_subtitles"
+  },
+  "midi_has_named_chord_track_hint": false,
+  "midi_note_events_only": true,
+  "chords_on_score": "마디별 음높이로 추정(표기용). Basic Pitch MIDI에는 코드 문자열이 들어가지 않음.",
+  "guitar_stem_mp3": "data\\jobs\\곽진언---일종의-고백-a-kind-of-confession-나의-해방일-dd887cf5\\stems\\guitar.mp3",
+  "stems": {
+    "vocals": "data\\jobs\\곽진언---일종의-고백-a-kind-of-confession-나의-해방일-dd887cf5\\stems\\vocals.mp3",
+    "drums": "data\\jobs\\곽진언---일종의-고백-a-kind-of-confession-나의-해방일-dd887cf5\\stems\\drums.mp3",
+    "bass": "data\\jobs\\곽진언---일종의-고백-a-kind-of-confession-나의-해방일-dd887cf5\\stems\\bass.mp3",
+    "other": "data\\jobs\\곽진언---일종의-고백-a-kind-of-confession-나의-해방일-dd887cf5\\stems\\other.mp3",
+    "guitar": "data\\jobs\\곽진언---일종의-고백-a-kind-of-confession-나의-해방일-dd887cf5\\stems\\guitar.mp3"
+  },
+  "midi_path": "data\\jobs\\곽진언---일종의-고백-a-kind-of-confession-나의-해방일-dd887cf5\\midi\\guitar.mid",
+  "midi_by_stem": {
+    "vocals": "data\\jobs\\곽진언---일종의-고백-a-kind-of-confession-나의-해방일-dd887cf5\\midi\\vocals.mid",
+    "bass": "data\\jobs\\곽진언---일종의-고백-a-kind-of-confession-나의-해방일-dd887cf5\\midi\\bass.mid",
+    "other": "data\\jobs\\곽진언---일종의-고백-a-kind-of-confession-나의-해방일-dd887cf5\\midi\\other.mid",
+    "guitar": "data\\jobs\\곽진언---일종의-고백-a-kind-of-confession-나의-해방일-dd887cf5\\midi\\guitar.mid"
+  },
+  "midi_stem_rms": {
+    "vocals": 0.17405569553375244,
+    "drums": 0.07549459487199783,
+    "bass": 0.05985794588923454,
+    "other": 0.10600180178880692
+  },
+  "midi_stem_rms_floor": 0.006962227821350098,
+  "midi_stem_skip_reasons": {
+    "drums": "melody_midi_excluded_instrument"
+  },
+  "melody_midi_stem_allowlist": [
+    "bass",
+    "guitar",
+    "other",
+    "piano",
+    "vocals"
+  ],
+  "alphatex_path": "data\\jobs\\곽진언---일종의-고백-a-kind-of-confession-나의-해방일-dd887cf5\\tab\\guitar.alphatex",
+  "job_meta_path": "data\\jobs\\곽진언---일종의-고백-a-kind-of-confession-나의-해방일-dd887cf5\\job_meta.json",
+  "audio_bpm": 129.19921875,
+  "beat_times_count": 479
+}

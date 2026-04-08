@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "testScoresRoot": "src/test-scores",
+  "skipFolders": [
+    "Sasha Sloan-Dancing With Your Ghost",
+    "yung kai-blue"
+  ],
+  "pairs": [
+    {
+      "id": "nerd-good-night",
+      "songFolder": "너드커넥션-좋은 밤 좋은 꿈",
+      "refAtex": "good-night-good-dream.atex"
+    },
+    {
+      "id": "kwak-confession",
+      "songFolder": "곽진언 - 일종의 고백",
+      "refAtex": "곽진언-일종의-고백.atex"
+    },
+    {
+      "id": "kim-thirty",
+      "songFolder": "김광석-서른즈음에",
+      "refAtex": "김광석-서른즈음에.atex"
+    },
+    {
+      "id": "kim-forget",
+      "songFolder": "김광석-잊어야 한다는 마음으로",
+      "refAtex": "김광석-잊어야-한다는-마음으로.atex"
+    },
+    {
+      "id": "baek-first-love",
+      "songFolder": "백아-첫사랑",
+      "refAtex": "baek-a-first-love.atex"
+    },
+    {
+      "id": "lee-old-love",
+      "songFolder": "이문세-옛사랑",
+      "refAtex": "이문세-옛사랑.atex"
+    },
+    {
+      "id": "moon-contrail",
+      "songFolder": "문문-비행운",
+      "refAtex": "비행운.atex"
+    },
+    {
+      "id": "hyukoh-wiing",
+      "songFolder": "혁오-위잉위잉",
+      "refAtex": "혁오-위잉위잉.atex"
+    }
+  ]
+}

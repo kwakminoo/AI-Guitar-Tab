@@ -1,6 +1,10 @@
 "use client";
 
-import { ScoreViewer, type AlphaTabScore } from "@/components/ScoreViewer";
+import {
+  ScoreViewer,
+  type AlphaTabScore,
+  type TranscriptionModelId,
+} from "@/components/ScoreViewer";
 import { useRef, useState } from "react";
 
 type SongMeta = {
@@ -37,6 +41,7 @@ export default function Home() {
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analyzeProgress, setAnalyzeProgress] = useState<number | null>(null);
+  const [transcriptionModel, setTranscriptionModel] = useState<TranscriptionModelId>("omnizart");
   /** 백엔드 진행 스냅샷이 바뀔 때만 UI 갱신(불필요한 리렌더·로딩바 깜빡임 방지) */
   const lastProgressSnapshotRef = useRef<string>("");
 
@@ -84,7 +89,11 @@ export default function Home() {
       const postPromise = fetch(apiUrl("/api/youtube/tab-preview"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: url.trim(), jobId }),
+        body: JSON.stringify({
+          url: url.trim(),
+          jobId,
+          transcriptionModel,
+        }),
       });
 
       timer = window.setInterval(() => {
@@ -144,57 +153,6 @@ export default function Home() {
     }
   };
 
-  const handlePreviewMidi = async (file: File): Promise<{ ok: boolean; message?: string }> => {
-    setStatus("MIDI 파일을 분석해 악보를 생성 중…");
-    setErrorDetail(null);
-    setIsAnalyzing(true);
-
-    try {
-      const formData = new FormData();
-      formData.append("file", file, file.name);
-      const res = await fetch(apiUrl("/api/midi/tab-preview"), {
-        method: "POST",
-        body: formData,
-      });
-      const payload = (await res.json().catch(() => ({}))) as {
-        detail?: string;
-        title?: string;
-        score?: AlphaTabScore;
-        alphatex?: string;
-      };
-      if (!res.ok) {
-        const msg =
-          typeof payload.detail === "string" ? payload.detail : `요청 실패 (${res.status})`;
-        throw new Error(msg);
-      }
-      if (!payload.score) {
-        throw new Error("서버 응답 형식이 올바르지 않습니다.");
-      }
-
-      const title = payload.title?.trim() || file.name.replace(/\.(mid|midi)$/i, "");
-      setSongMeta({
-        title,
-        artist: "MIDI Preview",
-        lyrics: null,
-        chords: payload.score.meta?.chords ?? [],
-        key: payload.score.meta?.key,
-        capo: payload.score.meta?.capo,
-      });
-      setScore(payload.score);
-      setAlphaTex(payload.alphatex ?? null);
-      setScoreViewerKey((k) => k + 1);
-      setStatus("MIDI 미리듣기용 악보를 불러왔습니다.");
-      return { ok: true };
-    } catch (e) {
-      const message = e instanceof Error ? e.message : "MIDI 처리 중 오류가 발생했습니다.";
-      setErrorDetail(message);
-      setStatus(null);
-      return { ok: false, message };
-    } finally {
-      setIsAnalyzing(false);
-    }
-  };
-
   return (
     <div className="flex h-screen min-h-screen flex-col bg-zinc-100">
       <header className="z-20 shrink-0 border-b border-zinc-200 bg-white px-4 py-3 shadow-sm">
@@ -219,7 +177,8 @@ export default function Home() {
           youtubeUrl={url}
           onYoutubeUrlChange={setUrl}
           onAnalyze={handleAnalyze}
-          onPreviewMidi={handlePreviewMidi}
+          transcriptionModel={transcriptionModel}
+          onTranscriptionModelChange={setTranscriptionModel}
           isAnalyzing={isAnalyzing}
           statusMessage={status}
           analyzeError={errorDetail}

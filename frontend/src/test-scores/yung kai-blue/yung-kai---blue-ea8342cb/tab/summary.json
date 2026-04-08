@@ -1,0 +1,55 @@
+{
+  "url": "https://www.youtube.com/watch?v=Kq4dbZJakMs",
+  "mp3_path": "data\\jobs\\yung-kai---blue-ea8342cb\\audio\\source.mp3",
+  "audio_duration_sec": 214.424688,
+  "capo_guess": 0,
+  "lyrics_source": "lrclib_cache",
+  "lyrics_files": {
+    "saved": true,
+    "paths": {
+      "lyrics_txt": "data\\jobs\\yung-kai---blue-ea8342cb\\lyrics.txt",
+      "tab_lyrics_txt": "data\\jobs\\yung-kai---blue-ea8342cb\\tab\\lyrics.txt",
+      "tab_lyrics_json": "data\\jobs\\yung-kai---blue-ea8342cb\\tab\\lyrics.json"
+    },
+    "source": "lrclib_cache"
+  },
+  "midi_has_named_chord_track_hint": false,
+  "midi_note_events_only": true,
+  "chords_on_score": "마디별 음높이로 추정(표기용). Basic Pitch MIDI에는 코드 문자열이 들어가지 않음.",
+  "guitar_stem_mp3": "data\\jobs\\yung-kai---blue-ea8342cb\\stems\\guitar.mp3",
+  "stems": {
+    "vocals": "data\\jobs\\yung-kai---blue-ea8342cb\\stems\\vocals.mp3",
+    "drums": "data\\jobs\\yung-kai---blue-ea8342cb\\stems\\drums.mp3",
+    "bass": "data\\jobs\\yung-kai---blue-ea8342cb\\stems\\bass.mp3",
+    "other": "data\\jobs\\yung-kai---blue-ea8342cb\\stems\\other.mp3",
+    "guitar": "data\\jobs\\yung-kai---blue-ea8342cb\\stems\\guitar.mp3"
+  },
+  "midi_path": "data\\jobs\\yung-kai---blue-ea8342cb\\midi\\guitar.mid",
+  "midi_by_stem": {
+    "vocals": "data\\jobs\\yung-kai---blue-ea8342cb\\midi\\vocals.mid",
+    "bass": "data\\jobs\\yung-kai---blue-ea8342cb\\midi\\bass.mid",
+    "other": "data\\jobs\\yung-kai---blue-ea8342cb\\midi\\other.mid",
+    "guitar": "data\\jobs\\yung-kai---blue-ea8342cb\\midi\\guitar.mid"
+  },
+  "midi_stem_rms": {
+    "vocals": 0.08901333808898926,
+    "drums": 0.042087357491254807,
+    "bass": 0.08443243056535721,
+    "other": 0.12740080058574677
+  },
+  "midi_stem_rms_floor": 0.00509603202342987,
+  "midi_stem_skip_reasons": {
+    "drums": "melody_midi_excluded_instrument"
+  },
+  "melody_midi_stem_allowlist": [
+    "bass",
+    "guitar",
+    "other",
+    "piano",
+    "vocals"
+  ],
+  "alphatex_path": "data\\jobs\\yung-kai---blue-ea8342cb\\tab\\guitar.alphatex",
+  "job_meta_path": "data\\jobs\\yung-kai---blue-ea8342cb\\job_meta.json",
+  "audio_bpm": 99.38401442307692,
+  "beat_times_count": 341
+}

@@ -1,0 +1,55 @@
+{
+  "url": "https://www.youtube.com/watch?v=5cvg1qPoOXM",
+  "mp3_path": "data\\jobs\\너드커넥션-nerd-connection-좋은-밤-좋은-꿈-취중-live-575eac22\\audio\\source.mp3",
+  "audio_duration_sec": 257.683458,
+  "capo_guess": 0,
+  "lyrics_source": "lrclib_cache",
+  "lyrics_files": {
+    "saved": true,
+    "paths": {
+      "lyrics_txt": "data\\jobs\\너드커넥션-nerd-connection-좋은-밤-좋은-꿈-취중-live-575eac22\\lyrics.txt",
+      "tab_lyrics_txt": "data\\jobs\\너드커넥션-nerd-connection-좋은-밤-좋은-꿈-취중-live-575eac22\\tab\\lyrics.txt",
+      "tab_lyrics_json": "data\\jobs\\너드커넥션-nerd-connection-좋은-밤-좋은-꿈-취중-live-575eac22\\tab\\lyrics.json"
+    },
+    "source": "lrclib_cache"
+  },
+  "midi_has_named_chord_track_hint": false,
+  "midi_note_events_only": true,
+  "chords_on_score": "마디별 음높이로 추정(표기용). Basic Pitch MIDI에는 코드 문자열이 들어가지 않음.",
+  "guitar_stem_mp3": "data\\jobs\\너드커넥션-nerd-connection-좋은-밤-좋은-꿈-취중-live-575eac22\\stems\\guitar.mp3",
+  "stems": {
+    "vocals": "data\\jobs\\너드커넥션-nerd-connection-좋은-밤-좋은-꿈-취중-live-575eac22\\stems\\vocals.mp3",
+    "drums": "data\\jobs\\너드커넥션-nerd-connection-좋은-밤-좋은-꿈-취중-live-575eac22\\stems\\drums.mp3",
+    "bass": "data\\jobs\\너드커넥션-nerd-connection-좋은-밤-좋은-꿈-취중-live-575eac22\\stems\\bass.mp3",
+    "other": "data\\jobs\\너드커넥션-nerd-connection-좋은-밤-좋은-꿈-취중-live-575eac22\\stems\\other.mp3",
+    "guitar": "data\\jobs\\너드커넥션-nerd-connection-좋은-밤-좋은-꿈-취중-live-575eac22\\stems\\guitar.mp3"
+  },
+  "midi_path": "data\\jobs\\너드커넥션-nerd-connection-좋은-밤-좋은-꿈-취중-live-575eac22\\midi\\guitar.mid",
+  "midi_by_stem": {
+    "vocals": "data\\jobs\\너드커넥션-nerd-connection-좋은-밤-좋은-꿈-취중-live-575eac22\\midi\\vocals.mid",
+    "other": "data\\jobs\\너드커넥션-nerd-connection-좋은-밤-좋은-꿈-취중-live-575eac22\\midi\\other.mid",
+    "guitar": "data\\jobs\\너드커넥션-nerd-connection-좋은-밤-좋은-꿈-취중-live-575eac22\\midi\\guitar.mid"
+  },
+  "midi_stem_rms": {
+    "vocals": 0.1766335666179657,
+    "drums": 0.002759811468422413,
+    "bass": 0.00029562157578766346,
+    "other": 0.10259829461574554
+  },
+  "midi_stem_rms_floor": 0.007065342664718628,
+  "midi_stem_skip_reasons": {
+    "drums": "melody_midi_excluded_instrument",
+    "bass": "rms_below_threshold(rms=0.000295622, floor=0.00706534)"
+  },
+  "melody_midi_stem_allowlist": [
+    "bass",
+    "guitar",
+    "other",
+    "piano",
+    "vocals"
+  ],
+  "alphatex_path": "data\\jobs\\너드커넥션-nerd-connection-좋은-밤-좋은-꿈-취중-live-575eac22\\tab\\guitar.alphatex",
+  "job_meta_path": "data\\jobs\\너드커넥션-nerd-connection-좋은-밤-좋은-꿈-취중-live-575eac22\\job_meta.json",
+  "audio_bpm": 123.046875,
+  "beat_times_count": 524
+}

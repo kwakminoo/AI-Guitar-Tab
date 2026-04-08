@@ -1,0 +1,12 @@
+{
+  "source": "lrclib_cache",
+  "char_count": 371,
+  "encoding": "utf-8",
+  "alphatex_lyrics_chars": 371,
+  "alphatex_lyrics_truncated": false,
+  "files": {
+    "plain_root": "data/jobs/김광석---잊어야-한다는-마음으로-가사-lyrics-7931b75e/lyrics.txt",
+    "plain_next_to_alphatex": "data/jobs/김광석---잊어야-한다는-마음으로-가사-lyrics-7931b75e/tab/lyrics.txt"
+  },
+  "alphatex_note": "guitar.alphatex 헤더의 \\\\lyrics 에 동일 가사가 들어가며, alphaTab이 박마다 음절을 배치한다. 문법: https://alphatab.net/docs/alphatex/metadata/staff/lyrics"
+}

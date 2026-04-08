@@ -1,0 +1,12 @@
+{
+  "source": "lrclib",
+  "char_count": 1159,
+  "encoding": "utf-8",
+  "alphatex_lyrics_chars": 1159,
+  "alphatex_lyrics_truncated": false,
+  "files": {
+    "plain_root": "data/jobs/sasha-alex-sloan---dancing-with-your-gho-6d5bf5ff/lyrics.txt",
+    "plain_next_to_alphatex": "data/jobs/sasha-alex-sloan---dancing-with-your-gho-6d5bf5ff/tab/lyrics.txt"
+  },
+  "alphatex_note": "guitar.alphatex 헤더의 \\\\lyrics 에 동일 가사가 들어가며, alphaTab이 박마다 음절을 배치한다. 문법: https://alphatab.net/docs/alphatex/metadata/staff/lyrics"
+}

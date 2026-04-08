@@ -25,6 +25,14 @@ if (-not (Test-Path $pythonExe)) {
 Write-Host "Installing dependencies (py311 profile)..." -ForegroundColor Cyan
 & $pythonExe -m pip install --upgrade pip
 & $pythonExe -m pip install -r (Join-Path $backendDir "requirements-py311.txt")
+
+$omniPy = Join-Path $backendDir ".venv_omnizart\Scripts\python.exe"
+if (-not (Test-Path $omniPy)) {
+  Write-Host "Omnizart venv 없음. Omnizart 전사를 쓰려면 한 번 실행: powershell -ExecutionPolicy Bypass -File `"$backendDir\scripts\ensure_omnizart_venv.ps1`"" -ForegroundColor Yellow
+} else {
+  Write-Host "Omnizart venv OK (자동 서브프로세스): $omniPy" -ForegroundColor Green
+}
+
 Write-Host "Skip optional madmom install (Windows 빌드 오류 방지)." -ForegroundColor Yellow
 Write-Host "필요할 때만 수동 설치: .venv311\\Scripts\\python.exe -m pip install madmom==0.16.1 --no-build-isolation" -ForegroundColor Yellow
 

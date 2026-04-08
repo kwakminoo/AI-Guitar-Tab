@@ -1,0 +1,55 @@
+{
+  "url": "https://www.youtube.com/watch?v=hvDOUl_DikM",
+  "mp3_path": "data\\jobs\\김광석---잊어야-한다는-마음으로-가사-lyrics-7931b75e\\audio\\source.mp3",
+  "audio_duration_sec": 257.799563,
+  "capo_guess": 0,
+  "lyrics_source": "lrclib_cache",
+  "lyrics_files": {
+    "saved": true,
+    "paths": {
+      "lyrics_txt": "data\\jobs\\김광석---잊어야-한다는-마음으로-가사-lyrics-7931b75e\\lyrics.txt",
+      "tab_lyrics_txt": "data\\jobs\\김광석---잊어야-한다는-마음으로-가사-lyrics-7931b75e\\tab\\lyrics.txt",
+      "tab_lyrics_json": "data\\jobs\\김광석---잊어야-한다는-마음으로-가사-lyrics-7931b75e\\tab\\lyrics.json"
+    },
+    "source": "lrclib_cache"
+  },
+  "midi_has_named_chord_track_hint": false,
+  "midi_note_events_only": true,
+  "chords_on_score": "마디별 음높이로 추정(표기용). Basic Pitch MIDI에는 코드 문자열이 들어가지 않음.",
+  "guitar_stem_mp3": "data\\jobs\\김광석---잊어야-한다는-마음으로-가사-lyrics-7931b75e\\stems\\guitar.mp3",
+  "stems": {
+    "vocals": "data\\jobs\\김광석---잊어야-한다는-마음으로-가사-lyrics-7931b75e\\stems\\vocals.mp3",
+    "drums": "data\\jobs\\김광석---잊어야-한다는-마음으로-가사-lyrics-7931b75e\\stems\\drums.mp3",
+    "bass": "data\\jobs\\김광석---잊어야-한다는-마음으로-가사-lyrics-7931b75e\\stems\\bass.mp3",
+    "other": "data\\jobs\\김광석---잊어야-한다는-마음으로-가사-lyrics-7931b75e\\stems\\other.mp3",
+    "guitar": "data\\jobs\\김광석---잊어야-한다는-마음으로-가사-lyrics-7931b75e\\stems\\guitar.mp3"
+  },
+  "midi_path": "data\\jobs\\김광석---잊어야-한다는-마음으로-가사-lyrics-7931b75e\\midi\\guitar.mid",
+  "midi_by_stem": {
+    "vocals": "data\\jobs\\김광석---잊어야-한다는-마음으로-가사-lyrics-7931b75e\\midi\\vocals.mid",
+    "bass": "data\\jobs\\김광석---잊어야-한다는-마음으로-가사-lyrics-7931b75e\\midi\\bass.mid",
+    "other": "data\\jobs\\김광석---잊어야-한다는-마음으로-가사-lyrics-7931b75e\\midi\\other.mid",
+    "guitar": "data\\jobs\\김광석---잊어야-한다는-마음으로-가사-lyrics-7931b75e\\midi\\guitar.mid"
+  },
+  "midi_stem_rms": {
+    "vocals": 0.04164915531873703,
+    "drums": 0.02669752947986126,
+    "bass": 0.07067743688821793,
+    "other": 0.05340703949332237
+  },
+  "midi_stem_rms_floor": 0.0028270974755287173,
+  "midi_stem_skip_reasons": {
+    "drums": "melody_midi_excluded_instrument"
+  },
+  "melody_midi_stem_allowlist": [
+    "bass",
+    "guitar",
+    "other",
+    "piano",
+    "vocals"
+  ],
+  "alphatex_path": "data\\jobs\\김광석---잊어야-한다는-마음으로-가사-lyrics-7931b75e\\tab\\guitar.alphatex",
+  "job_meta_path": "data\\jobs\\김광석---잊어야-한다는-마음으로-가사-lyrics-7931b75e\\job_meta.json",
+  "audio_bpm": 135.99917763157896,
+  "beat_times_count": 572
+}

@@ -13,6 +13,9 @@ import {
 
 export type { AlphaTabScore } from "@/types/alphatabScore";
 
+/** 유튜브 파이프라인 MIDI 전사 백엔드 선택 (미구현 모델은 API 501). */
+export type TranscriptionModelId = "omnizart" | "tabcnn" | "guitartab_architecture";
+
 /** 개발 시 src의 .atex 를 서버가 읽어 반환 (저장 후 새로고침 시 최신 반영). 실패 시 public 정적 파일로 폴백. */
 const TEST_SCORE_API_URL = TEST_SCORE_API_PATH;
 
@@ -24,6 +27,20 @@ const FALLBACK_TEST_ALPHATEX = [
   "\\staff {score tabs}",
   ":8 r |",
 ].join(" ");
+
+/** 세그먼트가 비어도 오선+타브가 보이도록 하는 최소 본문 (AlphaTab은 마디가 없으면 거의 그리지 않음) */
+const MINIMAL_TAB_ALPHATEX_BODY = ":16 r |";
+const FALLBACK_EMPTY_TAB_ALPHATEX = [
+  '\\title "빈 악보"',
+  "\\tempo 90",
+  "\\ts (4 4)",
+  '\\track "Guitar"',
+  "\\staff {score tabs}",
+  MINIMAL_TAB_ALPHATEX_BODY,
+].join(" ");
+
+/** 로컬 라우트로 서빙되는 alphaTab 정적 자산(오프라인/사내망 환경 대응). */
+const ALPHATAB_LOCAL_DIST = "/alphatab-assets";
 
 function IconPlay({ className }: { className?: string }) {
   return (
@@ -303,7 +320,8 @@ interface ScoreViewerProps {
   youtubeUrl?: string;
   onYoutubeUrlChange?: (value: string) => void;
   onAnalyze?: () => void;
-  onPreviewMidi?: (file: File) => Promise<{ ok: boolean; message?: string }>;
+  transcriptionModel?: TranscriptionModelId;
+  onTranscriptionModelChange?: (value: TranscriptionModelId) => void;
   isAnalyzing?: boolean;
   statusMessage?: string | null;
   analyzeError?: string | null;
@@ -319,7 +337,8 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
   youtubeUrl = "",
   onYoutubeUrlChange,
   onAnalyze,
-  onPreviewMidi,
+  transcriptionModel = "omnizart",
+  onTranscriptionModelChange,
   isAnalyzing = false,
   statusMessage,
   analyzeError,
@@ -345,16 +364,6 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
   const [layout, setLayout] = useState<"page" | "horizontal">("page");
   const [isStudyMode, setIsStudyMode] = useState(false);
   const [allowSeekByClick, setAllowSeekByClick] = useState(true);
-  const [midiPreviewName, setMidiPreviewName] = useState<string | null>(null);
-  const [midiPreviewError, setMidiPreviewError] = useState<string | null>(null);
-  const [isMidiPreviewLoading, setIsMidiPreviewLoading] = useState(false);
-  const [musicXmlPreviewName, setMusicXmlPreviewName] = useState<string | null>(null);
-  const [musicXmlPreviewError, setMusicXmlPreviewError] = useState<string | null>(null);
-  const [isMusicXmlPreviewLoading, setIsMusicXmlPreviewLoading] = useState(false);
-  const [musicXmlPreviewData, setMusicXmlPreviewData] = useState<{
-    fileName: string;
-    bytes: Uint8Array;
-  } | null>(null);
   const [activeBeatText, setActiveBeatText] = useState<string>("대기 중");
   const [selectionState, setSelectionState] = useState<string>("선택 없음");
   const [hoveredNoteText, setHoveredNoteText] = useState<string>("노트 정보 없음");
@@ -454,7 +463,16 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
     () => normalizeScoreForRendering(workingScore),
     [workingScore],
   );
-  const modelError = normalizedScore === null ? "악보 데이터 형식이 올바르지 않습니다." : null;
+  /** API score가 깨져도 타브 칸에는 빈 오선+타브(알파택스)를 유지한다. */
+  const emptyBaselineNormalized = useMemo(
+    () => normalizeScoreForRendering(nullBaseline),
+    [nullBaseline],
+  );
+  const scoreForRendering = (normalizedScore ?? emptyBaselineNormalized ?? nullBaseline) as AlphaTabScore;
+  const modelError =
+    normalizedScore === null && score != null
+      ? "악보 데이터 형식이 올바르지 않습니다."
+      : null;
 
   useEffect(() => {
     if (!mainRef.current) return;
@@ -464,23 +482,18 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
     trackListRef.current?.replaceChildren();
     previousSecondRef.current = -1;
 
-    if (scorePanelMode !== "test" && !normalizedScore && !hasBackendAlphaTex && !musicXmlPreviewData)
-      return;
+    if (scorePanelMode !== "test" && !hasBackendAlphaTex && !scoreForRendering) return;
 
     const lyricsForStaff =
       songLyrics?.trim() ||
       (score?.meta && typeof score.meta.lyrics === "string" ? score.meta.lyrics.trim() : "");
+    const sourceTex = hasBackendAlphaTex
+      ? (alphaTex as string)
+      : buildAlphaTex(scoreForRendering);
     const tex =
       scorePanelMode === "test"
         ? testAlphaTex
-        : musicXmlPreviewData
-          ? null
-          : mergeLyricsIntoAlphaTex(
-              hasBackendAlphaTex
-                ? (alphaTex as string)
-                : buildAlphaTex(normalizedScore as AlphaTabScore),
-              lyricsForStaff || null,
-            );
+        : mergeLyricsIntoAlphaTex(sourceTex || FALLBACK_EMPTY_TAB_ALPHATEX, lyricsForStaff || null);
 
     (async () => {
       const alphaTab = await loadAlphaTabUmd();
@@ -498,14 +511,13 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
       settings.display.barCountPerPartial = 8;
       settings.display.justifyLastSystem = true;
       settings.display.stretchForce = isStudyMode ? 0.92 : 1;
-      settings.core.useWorkers = true;
+      // 우선 렌더 안정화를 위해 워커를 끄고 메인 스레드 렌더만 사용한다.
+      settings.core.useWorkers = false;
       settings.core.enableLazyLoading = true;
       settings.core.includeNoteBounds = isStudyMode;
       settings.core.engine = "svg";
-      settings.core.scriptFile =
-        "https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/alphaTab.js";
-      settings.core.fontDirectory =
-        "https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/font/";
+      settings.core.scriptFile = `${ALPHATAB_LOCAL_DIST}/alphaTab.js`;
+      settings.core.fontDirectory = `${ALPHATAB_LOCAL_DIST}/font/`;
       // 개발 중 콘솔 노이즈를 줄이고, 프로덕션에서만 경고 이상 로그를 남긴다.
       settings.core.logLevel = process.env.NODE_ENV === "development" ? 2 : 3;
       // notation.* 는 렌더링 표현 품질을 제어하며, MIDI 자체 데이터는 변경하지 않는다.
@@ -534,8 +546,9 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
       if (NE?.EffectLyrics !== undefined && notationElements) {
         notationElements.set(NE.EffectLyrics, true);
       }
-      settings.player.enablePlayer = true;
-      settings.player.enableCursor = true;
+      // AlphaSynth/WebWorker 초기화 오류가 UI 전체 렌더를 막지 않도록 렌더 우선 모드로 둔다.
+      settings.player.enablePlayer = false;
+      settings.player.enableCursor = false;
       settings.player.enableElementHighlighting = true;
       settings.player.enableAnimatedBeatCursor = true;
       settings.player.enableUserInteraction = allowSeekByClick;
@@ -551,8 +564,7 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
       settings.player.scrollOffsetY = isStudyMode ? -24 : -12;
       // nativeBrowserSmoothScroll=false일 때에만 scrollSpeed가 유효하다.
       settings.player.scrollSpeed = isStudyMode ? 220 : 300;
-      settings.player.soundFont =
-        "https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/soundfont/sonivox.sf2";
+      settings.player.soundFont = `${ALPHATAB_LOCAL_DIST}/soundfont/sonivox.sf2`;
       if (viewportRef.current) {
         settings.player.scrollElement = viewportRef.current;
       }
@@ -909,23 +921,16 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
       requestAnimationFrame(() => {
         try {
           setRenderError(null);
-          if (scorePanelMode !== "test" && musicXmlPreviewData) {
-            const parsedScore = alphaTab.importer?.ScoreLoader?.loadScoreFromBytes?.(
-              musicXmlPreviewData.bytes,
-              settings,
-            );
-            if (!parsedScore || !api.renderScore) {
-              const loaded = api.load?.(musicXmlPreviewData.bytes);
-              if (!loaded) {
-                throw new Error("MusicXML 파일 로딩에 실패했습니다. 파일 형식을 확인해 주세요.");
-              }
-              return;
-            }
-            coerceScoreToGuitarTab(parsedScore);
-            api.renderScore(parsedScore, [-1]);
-            return;
-          }
           api.tex(tex ?? "");
+          window.setTimeout(() => {
+            if (disposed || !mainRef.current) return;
+            const hasRenderedNode =
+              Boolean(mainRef.current.querySelector("svg")) ||
+              Boolean(mainRef.current.querySelector("canvas"));
+            if (!hasRenderedNode && !renderError) {
+              setRenderError("AlphaTab 렌더 결과가 비어 있습니다. (SVG/Canvas 미생성)");
+            }
+          }, 1200);
         } catch (e) {
           const msg = e instanceof Error ? e.message : "AlphaTab 렌더 실패";
           setRenderError(msg);
@@ -948,12 +953,11 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
     allowSeekByClick,
     isStudyMode,
     layout,
-    normalizedScore,
+    scoreForRendering,
     speedTrainerEnabled,
     zoom,
     alphaTex,
     hasBackendAlphaTex,
-    musicXmlPreviewData,
     songLyrics,
     scorePanelMode,
     score,
@@ -1037,85 +1041,8 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
     api.render();
   };
 
-  const handleMidiFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0] ?? null;
-    event.target.value = "";
-    if (!file) return;
-
-    const isMidi =
-      file.type === "audio/midi" ||
-      file.type === "audio/x-midi" ||
-      file.name.toLowerCase().endsWith(".mid") ||
-      file.name.toLowerCase().endsWith(".midi");
-    if (!isMidi) {
-      setMidiPreviewError("MIDI 파일(.mid, .midi)만 업로드할 수 있습니다.");
-      return;
-    }
-
-    if (!onPreviewMidi) {
-      setMidiPreviewError("MIDI 미리듣기 기능이 연결되지 않았습니다.");
-      return;
-    }
-
-    try {
-      setIsMidiPreviewLoading(true);
-      const result = await onPreviewMidi(file);
-      if (!result.ok) {
-        setMidiPreviewError(result.message || "MIDI 로드 중 오류가 발생했습니다.");
-        return;
-      }
-      setMidiPreviewName(file.name);
-      setMidiPreviewError(result.message ?? null);
-    } catch (e) {
-      const message = e instanceof Error ? e.message : "MIDI 로드 중 오류가 발생했습니다.";
-      setMidiPreviewError(message);
-    } finally {
-      setIsMidiPreviewLoading(false);
-    }
-  };
-
-  const handleMusicXmlFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0] ?? null;
-    event.target.value = "";
-    if (!file) return;
-
-    const lowerName = file.name.toLowerCase();
-    const isMusicXml =
-      file.type === "application/xml" ||
-      file.type === "text/xml" ||
-      lowerName.endsWith(".musicxml") ||
-      lowerName.endsWith(".xml") ||
-      lowerName.endsWith(".mxl");
-    if (!isMusicXml) {
-      setMusicXmlPreviewError("MusicXML 파일(.musicxml, .xml, .mxl)만 업로드할 수 있습니다.");
-      return;
-    }
-
-    try {
-      setIsMusicXmlPreviewLoading(true);
-      setMusicXmlPreviewError(null);
-      const arrayBuffer = await file.arrayBuffer();
-      const bytes = new Uint8Array(arrayBuffer);
-      if (bytes.length === 0) {
-        throw new Error("빈 파일은 불러올 수 없습니다.");
-      }
-      setScorePanelMode("tab");
-      setMusicXmlPreviewData({ fileName: file.name, bytes });
-      setMusicXmlPreviewName(file.name);
-    } catch (e) {
-      const message = e instanceof Error ? e.message : "MusicXML 로드 중 오류가 발생했습니다.";
-      setMusicXmlPreviewError(message);
-    } finally {
-      setIsMusicXmlPreviewLoading(false);
-    }
-  };
-
   const displayTitle =
-    scorePanelMode === "test"
-      ? TEST_SCORE_DISPLAY_TITLE
-      : musicXmlPreviewData?.fileName
-        ? fileNameToTitle(musicXmlPreviewData.fileName)
-        : (songTitle ?? "").trim();
+    scorePanelMode === "test" ? TEST_SCORE_DISPLAY_TITLE : (songTitle ?? "").trim();
   const artistText = (songArtist ?? "").trim();
 
   return (
@@ -1155,45 +1082,34 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
             {analyzeError ? (
               <p className="text-[11px] leading-snug text-red-600">{analyzeError}</p>
             ) : null}
-            <div className="mt-3 space-y-1 rounded-lg border border-zinc-200 bg-white p-2">
-              <p className="text-[11px] font-semibold text-zinc-700">MIDI 미리듣기</p>
-              <input
-                type="file"
-                accept=".mid,.midi,audio/midi,audio/x-midi"
-                onChange={handleMidiFileChange}
-                disabled={isMidiPreviewLoading}
-                className="w-full text-[11px] text-zinc-700 file:mr-2 file:rounded-md file:border file:border-zinc-300 file:bg-zinc-100 file:px-2 file:py-1 file:text-[11px] file:font-medium file:text-zinc-700 hover:file:bg-zinc-200"
-              />
-              {isMidiPreviewLoading ? (
-                <p className="text-[11px] leading-snug text-zinc-600">MIDI를 변환 중입니다...</p>
-              ) : null}
-              {midiPreviewName ? (
-                <p className="text-[11px] leading-snug text-zinc-600">
-                  로드됨: {midiPreviewName}
-                </p>
-              ) : null}
-              {midiPreviewError ? (
-                <p className="text-[11px] leading-snug text-red-600">{midiPreviewError}</p>
-              ) : null}
-            </div>
-            <div className="mt-3 space-y-1 rounded-lg border border-zinc-200 bg-white p-2">
-              <p className="text-[11px] font-semibold text-zinc-700">MusicXML 미리보기</p>
-              <input
-                type="file"
-                accept=".musicxml,.xml,.mxl,application/xml,text/xml"
-                onChange={handleMusicXmlFileChange}
-                disabled={isMusicXmlPreviewLoading}
-                className="w-full text-[11px] text-zinc-700 file:mr-2 file:rounded-md file:border file:border-zinc-300 file:bg-zinc-100 file:px-2 file:py-1 file:text-[11px] file:font-medium file:text-zinc-700 hover:file:bg-zinc-200"
-              />
-              {isMusicXmlPreviewLoading ? (
-                <p className="text-[11px] leading-snug text-zinc-600">MusicXML을 로드 중입니다...</p>
-              ) : null}
-              {musicXmlPreviewName ? (
-                <p className="text-[11px] leading-snug text-zinc-600">로드됨: {musicXmlPreviewName}</p>
-              ) : null}
-              {musicXmlPreviewError ? (
-                <p className="text-[11px] leading-snug text-red-600">{musicXmlPreviewError}</p>
-              ) : null}
+            <div className="mt-3 space-y-2 rounded-lg border border-zinc-200 bg-white p-2">
+              <p className="text-[11px] font-semibold text-zinc-700">MIDI 전사 모델</p>
+              <p className="text-[10px] leading-snug text-zinc-500">
+                스템→MIDI→알파택스 파이프라인에서 사용할 모델을 고릅니다.
+              </p>
+              <div className="flex flex-col gap-1">
+                {(
+                  [
+                    { id: "omnizart" as const, label: "Omnizart" },
+                    { id: "tabcnn" as const, label: "TabCNN" },
+                    { id: "guitartab_architecture" as const, label: "GuitarTab-Architecture" },
+                  ] as const
+                ).map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    aria-pressed={transcriptionModel === opt.id}
+                    onClick={() => onTranscriptionModelChange?.(opt.id)}
+                    className={`rounded-md border px-2 py-1.5 text-left text-[11px] font-medium transition ${
+                      transcriptionModel === opt.id
+                        ? "border-zinc-900 bg-zinc-900 text-white"
+                        : "border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100"
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
@@ -1592,7 +1508,10 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
                 ) : null}
               </p>
             ) : null}
-            <div ref={mainRef} className="min-h-full w-full" />
+            <div
+              ref={mainRef}
+              className="min-h-[min(70vh,28rem)] w-full min-w-0 flex-1"
+            />
           </div>
         </div>
       </div>
@@ -1613,8 +1532,15 @@ function buildAlphaTex(score: AlphaTabScore): string {
       ? `\\lyrics "${escapeTexLyrics(rawLyrics.trim())}"`
       : "";
 
+  const rawTitle =
+    typeof score.meta.title === "string" && score.meta.title.trim().length > 0
+      ? score.meta.title.trim()
+      : "빈 악보";
+  const titleLine = `\\title "${escapeTex(rawTitle)}"`;
+
   const header = [
-    `\\tempo ${score.meta.tempo}`,
+    titleLine,
+    `\\tempo ${tempo}`,
     `\\ts (${num} ${den})`,
     `\\track "${escapeTex(t.name ?? "Guitar")}"`,
     "\\staff {score tabs}",
@@ -1643,12 +1569,14 @@ function buildAlphaTex(score: AlphaTabScore): string {
       ? medianDelta
       : fallbackBaseUnitSec;
   const measureSec = num * quarterSec * (4 / Math.max(1, den));
-  const measureUnitsTarget = Math.max(1, Math.round(measureSec / baseUnitSec));
+  const safeBaseUnitSec =
+    Number.isFinite(baseUnitSec) && baseUnitSec > 1e-9 ? baseUnitSec : fallbackBaseUnitSec;
+  const measureUnitsTarget = Math.max(1, Math.round(measureSec / safeBaseUnitSec));
 
   // :16 기준이 1/16 단위라서 세그먼트가 이 그리드의 정수 배로 나오도록 :32는 제외한다.
   const allowedDenByUnits = [16, 8, 4, 2, 1];
   const durationSecondsToDen = (durationSec: number): number => {
-    const units = durationSec / baseUnitSec;
+    const units = durationSec / safeBaseUnitSec;
     // durationChange의 value는 분모(예: :4, :8)로 해석된다.
     // baseDen=16을 기준으로 units = 16/den 관계를 사용해 nearest를 찾는다.
     let bestDen = baseDen;
@@ -1694,7 +1622,7 @@ function buildAlphaTex(score: AlphaTabScore): string {
   const segments: Array<{ start: number; end: number; content: string }> = [];
   for (let i = 0; i < beats.length; i++) {
     const b = beats[i];
-    const nextBeatTime = beats[i + 1]?.time ?? b.time + baseUnitSec;
+    const nextBeatTime = beats[i + 1]?.time ?? b.time + safeBaseUnitSec;
     const playableNotes = (b.notes ?? []).filter((n) => Number(n.fret) >= 0);
     const noteEnd =
       playableNotes.length > 0
@@ -1704,12 +1632,12 @@ function buildAlphaTex(score: AlphaTabScore): string {
     const content = makeBeatContent(b);
 
     const segment1End = Math.min(noteEnd, nextBeatTime);
-    if (segment1End > b.time + baseUnitSec * 0.05) {
+    if (segment1End > b.time + safeBaseUnitSec * 0.05) {
       segments.push({ start: b.time, end: segment1End, content });
     }
 
     // note가 beat 경계 이전에 끝났고, 다음 beat까지 공백이 있다면 rest로 채운다.
-    if (noteEnd + baseUnitSec * 0.05 < nextBeatTime) {
+    if (noteEnd + safeBaseUnitSec * 0.05 < nextBeatTime) {
       segments.push({
         start: segment1End,
         end: nextBeatTime,
@@ -1760,7 +1688,8 @@ function buildAlphaTex(score: AlphaTabScore): string {
     groupedRows.push(bars.slice(i, i + barsPerRow).join(" "));
   }
   const body = groupedRows.join("\n").replace(/[ \t]+/g, " ").trim();
-  return `${header} ${body}`.trim();
+  const safeBody = body.length > 0 ? body : MINIMAL_TAB_ALPHATEX_BODY;
+  return `${header} ${safeBody}`.trim();
 }
 
 function escapeTex(input: string): string {
@@ -1823,101 +1752,6 @@ function formatDurationMs(milliseconds: number): string {
   const minutes = (seconds / 60) | 0;
   seconds = (seconds - minutes * 60) | 0;
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-}
-
-function fileNameToTitle(fileName: string): string {
-  const noExt = fileName.replace(/\.[^./\\]+$/u, "");
-  return noExt.trim() || fileName.trim();
-}
-
-function coerceScoreToGuitarTab(score: unknown): void {
-  if (!score || typeof score !== "object") return;
-  const s = score as {
-    tracks?: Array<{
-      name?: string;
-      staves?: Array<{
-        isPercussion?: boolean;
-        showTablature?: boolean;
-        showStandardNotation?: boolean;
-        stringTuning?: { tunings?: number[]; name?: string; isStandard?: boolean };
-        bars?: Array<{
-          voices?: Array<{
-            beats?: Array<{
-              notes?: Array<{
-                string?: number;
-                fret?: number;
-                octave?: number;
-                tone?: number;
-              }>;
-            }>;
-          }>;
-        }>;
-      }>;
-    }>;
-  };
-  const tracks = s.tracks ?? [];
-  const guitarTuningsTopToBottom = [64, 59, 55, 50, 45, 40];
-
-  for (const track of tracks) {
-    if (!track.name?.trim()) {
-      track.name = "Guitar";
-    }
-    for (const staff of track.staves ?? []) {
-      staff.isPercussion = false;
-      staff.showTablature = true;
-      staff.showStandardNotation = false;
-      if (!staff.stringTuning) staff.stringTuning = { tunings: [] };
-      staff.stringTuning.tunings = [...guitarTuningsTopToBottom];
-      staff.stringTuning.name = "Guitar Standard";
-      staff.stringTuning.isStandard = true;
-
-      for (const bar of staff.bars ?? []) {
-        for (const voice of bar.voices ?? []) {
-          for (const beat of voice.beats ?? []) {
-            for (const note of beat.notes ?? []) {
-              if (typeof note.string === "number" && note.string >= 1 && typeof note.fret === "number" && note.fret >= 0) {
-                continue;
-              }
-              const midi =
-                typeof note.octave === "number" && typeof note.tone === "number"
-                  ? note.octave * 12 + note.tone
-                  : null;
-              if (midi === null || !Number.isFinite(midi)) continue;
-              const mapped = mapMidiToGuitarPosition(midi);
-              if (!mapped) continue;
-              note.string = mapped.string;
-              note.fret = mapped.fret;
-            }
-          }
-        }
-      }
-    }
-  }
-}
-
-function mapMidiToGuitarPosition(inputMidi: number): { string: number; fret: number } | null {
-  // string 1 = 저음 E2(40), string 6 = 고음 E4(64)
-  const lowToHighOpen = [40, 45, 50, 55, 59, 64];
-  let midi = Math.round(inputMidi);
-  const minMidi = lowToHighOpen[0];
-  const maxMidi = lowToHighOpen[lowToHighOpen.length - 1] + 24;
-  while (midi < minMidi) midi += 12;
-  while (midi > maxMidi) midi -= 12;
-
-  let best: { string: number; fret: number; score: number } | null = null;
-  for (let i = 0; i < lowToHighOpen.length; i++) {
-    const open = lowToHighOpen[i];
-    const fret = midi - open;
-    if (fret < 0 || fret > 24) continue;
-    const string = i + 1;
-    const comfort = Math.abs(fret - 5);
-    const score = fret + comfort * 0.25 + (6 - string) * 0.01;
-    if (!best || score < best.score) {
-      best = { string, fret, score };
-    }
-  }
-  if (!best) return null;
-  return { string: best.string, fret: best.fret };
 }
 
 function getBeatPlaybackMs(beat: unknown): number | null {
@@ -2107,12 +1941,16 @@ function loadAlphaTabUmd(): Promise<AlphaTabModuleLike> {
     return Promise.reject(new Error("브라우저 환경에서만 alphaTab을 로드할 수 있습니다."));
   }
 
-  const maybeLoaded = (window as unknown as { alphaTab?: AlphaTabModuleLike }).alphaTab;
-  if (maybeLoaded) return Promise.resolve(maybeLoaded);
   if (alphaTabLoadPromise) return alphaTabLoadPromise;
 
   alphaTabLoadPromise = new Promise<AlphaTabModuleLike>((resolve, reject) => {
-    const existing = document.getElementById("alphatab-cdn-script") as HTMLScriptElement | null;
+    const globalAt = (window as unknown as { alphaTab?: AlphaTabModuleLike }).alphaTab;
+    if (globalAt) {
+      resolve(globalAt);
+      return;
+    }
+
+    const existing = document.getElementById("alphatab-local-script") as HTMLScriptElement | null;
     if (existing) {
       existing.addEventListener("load", () => {
         const loaded = (window as unknown as { alphaTab?: AlphaTabModuleLike }).alphaTab;
@@ -2120,22 +1958,22 @@ function loadAlphaTabUmd(): Promise<AlphaTabModuleLike> {
         else reject(new Error("alphaTab 스크립트는 로드되었지만 전역 객체가 없습니다."));
       });
       existing.addEventListener("error", () => {
-        reject(new Error("alphaTab 스크립트 로드에 실패했습니다."));
+        reject(new Error(`alphaTab 스크립트 로드에 실패했습니다: ${existing.src}`));
       });
       return;
     }
 
     const script = document.createElement("script");
-    script.id = "alphatab-cdn-script";
+    script.id = "alphatab-local-script";
     script.async = true;
-    script.src = "https://cdn.jsdelivr.net/npm/@coderline/alphatab@latest/dist/alphaTab.js";
+    script.src = `${ALPHATAB_LOCAL_DIST}/alphaTab.js`;
     script.onload = () => {
       const loaded = (window as unknown as { alphaTab?: AlphaTabModuleLike }).alphaTab;
       if (loaded) resolve(loaded);
       else reject(new Error("alphaTab 스크립트는 로드되었지만 전역 객체가 없습니다."));
     };
     script.onerror = () => {
-      reject(new Error("alphaTab 스크립트 로드에 실패했습니다."));
+      reject(new Error(`alphaTab 스크립트 로드에 실패했습니다: ${script.src}`));
     };
     document.head.appendChild(script);
   });

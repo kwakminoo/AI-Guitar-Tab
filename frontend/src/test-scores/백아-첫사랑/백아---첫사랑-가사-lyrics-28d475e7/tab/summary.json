@@ -1,0 +1,55 @@
+{
+  "url": "https://www.youtube.com/watch?v=54vt4Nalaa8",
+  "mp3_path": "data\\jobs\\백아---첫사랑-가사-lyrics-28d475e7\\audio\\source.mp3",
+  "audio_duration_sec": 189.231021,
+  "capo_guess": 0,
+  "lyrics_source": "youtube_subtitles",
+  "lyrics_files": {
+    "saved": true,
+    "paths": {
+      "lyrics_txt": "data\\jobs\\백아---첫사랑-가사-lyrics-28d475e7\\lyrics.txt",
+      "tab_lyrics_txt": "data\\jobs\\백아---첫사랑-가사-lyrics-28d475e7\\tab\\lyrics.txt",
+      "tab_lyrics_json": "data\\jobs\\백아---첫사랑-가사-lyrics-28d475e7\\tab\\lyrics.json"
+    },
+    "source": "youtube_subtitles"
+  },
+  "midi_has_named_chord_track_hint": false,
+  "midi_note_events_only": true,
+  "chords_on_score": "마디별 음높이로 추정(표기용). Basic Pitch MIDI에는 코드 문자열이 들어가지 않음.",
+  "guitar_stem_mp3": "data\\jobs\\백아---첫사랑-가사-lyrics-28d475e7\\stems\\guitar.mp3",
+  "stems": {
+    "vocals": "data\\jobs\\백아---첫사랑-가사-lyrics-28d475e7\\stems\\vocals.mp3",
+    "drums": "data\\jobs\\백아---첫사랑-가사-lyrics-28d475e7\\stems\\drums.mp3",
+    "bass": "data\\jobs\\백아---첫사랑-가사-lyrics-28d475e7\\stems\\bass.mp3",
+    "other": "data\\jobs\\백아---첫사랑-가사-lyrics-28d475e7\\stems\\other.mp3",
+    "guitar": "data\\jobs\\백아---첫사랑-가사-lyrics-28d475e7\\stems\\guitar.mp3"
+  },
+  "midi_path": "data\\jobs\\백아---첫사랑-가사-lyrics-28d475e7\\midi\\guitar.mid",
+  "midi_by_stem": {
+    "vocals": "data\\jobs\\백아---첫사랑-가사-lyrics-28d475e7\\midi\\vocals.mid",
+    "other": "data\\jobs\\백아---첫사랑-가사-lyrics-28d475e7\\midi\\other.mid",
+    "guitar": "data\\jobs\\백아---첫사랑-가사-lyrics-28d475e7\\midi\\guitar.mid"
+  },
+  "midi_stem_rms": {
+    "vocals": 0.07686708122491837,
+    "drums": 0.000289477058686316,
+    "bass": 0.0001953928149305284,
+    "other": 0.0557129830121994
+  },
+  "midi_stem_rms_floor": 0.0030746832489967346,
+  "midi_stem_skip_reasons": {
+    "drums": "melody_midi_excluded_instrument",
+    "bass": "rms_below_threshold(rms=0.000195393, floor=0.00307468)"
+  },
+  "melody_midi_stem_allowlist": [
+    "bass",
+    "guitar",
+    "other",
+    "piano",
+    "vocals"
+  ],
+  "alphatex_path": "data\\jobs\\백아---첫사랑-가사-lyrics-28d475e7\\tab\\guitar.alphatex",
+  "job_meta_path": "data\\jobs\\백아---첫사랑-가사-lyrics-28d475e7\\job_meta.json",
+  "audio_bpm": 135.99917763157896,
+  "beat_times_count": 405
+}

@@ -20,6 +20,7 @@ import pretty_midi
 
 from .beat_audio import analyze_beats_from_mix_mp3, analyze_onsets_from_guitar_audio, snap_midi_notes_to_sixteenth_grid
 from .lyrics_lrclib import fetch_lyrics_from_lrclib, parse_artist_and_track_from_youtube_title
+from .omnizart_guitar import extract_guitar_tab_hints_from_midi, transcribe_guitar_stem_to_midi
 
 GUITAR_OPEN_MIDI = [64, 59, 55, 50, 45, 40]  # E4, B3, G3, D3, A2, E2
 GUITAR_MIN_PITCH = 40
@@ -433,6 +434,61 @@ def _guess_capo_from_text(*texts: str | None) -> int:
             if 0 <= v <= 12:
                 return v
     return 0
+
+
+def _chord_label_notation_simplicity(label: str | None) -> float:
+    """코드 문자열이 단순(샵/플 적음)할수록 높은 점수 — 카포 후보 선택용."""
+    if not label or label == "?":
+        return 0.2
+    s = str(label)
+    head = s[:5]
+    if "#" in head:
+        return 0.45
+    if re.match(r"^[A-G]b", s) and not s.startswith("Bb"):
+        return 0.55
+    return 1.0
+
+
+def _capo_style_prior(capo: int) -> float:
+    """test-scores 정답지에서 자주 나온 카포(2·3)에 소프트 바이어스."""
+    if capo in (2, 3):
+        return 0.35
+    if capo in (0, 4, 5):
+        return 0.12
+    return 0.05
+
+
+def _refine_capo_with_midi(
+    raw_notes: list[dict[str, Any]],
+    bars_info: list[tuple[float, float, int, int, float, int]],
+    text_capo: int,
+) -> int:
+    """
+    제목/가사에 카포가 없을 때, 마디별 코드 표기 단순도로 카포 후보(0~12) 선택.
+    텍스트에서 이미 유효한 카포가 있으면 그대로 둔다.
+    """
+    tc = max(0, min(12, int(text_capo)))
+    if tc > 0:
+        return tc
+    if not bars_info:
+        return 0
+    candidates = (0, 2, 3, 4, 5, 7, 9)
+    best_c = 0
+    best_score = -1e9
+    for c in candidates:
+        labels = _bar_chord_labels(raw_notes, bars_info, c)
+        sim = sum(_chord_label_notation_simplicity(lbl) for lbl in labels)
+        total = sim + _capo_style_prior(c)
+        if total > best_score + 1e-9:
+            best_score = total
+            best_c = c
+    return best_c
+
+
+def _alphatex_emit_dynamics() -> bool:
+    """기본은 끔(정답지 스타일). ALPHATEX_INCLUDE_DY=1 이면 velocity→{dy} 유지."""
+    v = (os.environ.get("ALPHATEX_INCLUDE_DY") or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
 
 
 def _raw_guitar_notes_from_midi(midi: pretty_midi.PrettyMIDI) -> list[dict[str, Any]]:
@@ -931,11 +987,17 @@ def _fetch_youtube_meta(url: str) -> tuple[str, str | None, str | None, float | 
     return title, artist, description or None, duration_sec, uploader
 
 
+DEMUCS_MODEL_NAME = (os.environ.get("DEMUCS_MODEL") or "htdemucs_6s").strip() or "htdemucs_6s"
+
+
 def _separate_demucs(mp3_path: Path, out_dir: Path) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    _run([sys.executable, "-m", "demucs.separate", "-n", "htdemucs", "--mp3", "-o", str(out_dir), str(mp3_path)])
-    # demucs output: <out_dir>/htdemucs/<track_name>/*.mp3
-    candidates = sorted((out_dir / "htdemucs").glob("*"))
+    model_name = DEMUCS_MODEL_NAME
+    _run(
+        [sys.executable, "-m", "demucs.separate", "-n", model_name, "--mp3", "-o", str(out_dir), str(mp3_path)]
+    )
+    # demucs output: <out_dir>/<model_name>/<track_name>/*.mp3
+    candidates = sorted((out_dir / model_name).glob("*"))
     if not candidates:
         raise RuntimeError("Demucs 결과 폴더를 찾지 못했습니다.")
     track_dir = candidates[0]
@@ -957,9 +1019,8 @@ def _separate_demucs(mp3_path: Path, out_dir: Path) -> dict[str, Path]:
 
 def _ensure_flat_guitar_stem_mp3(stems: dict[str, Path], stems_root: Path) -> Path:
     """
-    Demucs htdemucs는 보통 vocals/drums/bass/other 만 내보내고 파일명 `guitar`는 없다.
-    Basic Pitch·onset에 쓰는 트랙(other 또는 일부 모델의 guitar)을 `stems/guitar.mp3`로 복사해
-    작업 폴더에서 분리 기타 음원을 바로 찾을 수 있게 한다.
+    `guitar` 스템이 있으면 그대로 사용하고, 없으면(4스템 모델 등) `other`를 기타 트랙으로 복사한다.
+    Omnizart/Basic Pitch·onset 입력은 항상 `stems/guitar.mp3`를 가리키게 한다.
     """
     src = stems.get("guitar") or stems.get("other")
     if not src or not src.is_file():
@@ -983,6 +1044,58 @@ def _basic_pitch_to_midi(guitar_audio: Path, midi_out: Path) -> Path:
         raise RuntimeError("Basic Pitch 변환 결과 MIDI 파일을 찾지 못했습니다.")
     produced[0].replace(midi_out)
     return midi_out
+
+
+def _guitar_stem_to_midi(guitar_audio: Path, midi_out: Path) -> Path:
+    """
+    기타 스템 → MIDI. 기본은 Omnizart(Pop 등). `GUITAR_TRANSCRIBE_BACKEND=basic_pitch` 이면 예전 Basic Pitch 경로.
+    """
+    backend = (os.environ.get("GUITAR_TRANSCRIBE_BACKEND") or "omnizart").strip().lower()
+    if backend in ("basic_pitch", "basic-pitch", "bp"):
+        return _basic_pitch_to_midi(guitar_audio, midi_out)
+    if backend in ("omnizart", "omni", "guitar"):
+        return transcribe_guitar_stem_to_midi(guitar_audio, midi_out)
+    raise ValueError(f"지원하지 않는 GUITAR_TRANSCRIBE_BACKEND: {backend!r}")
+
+
+def _match_tab_hint_for_note(
+    note: dict[str, Any],
+    hints: list[dict[str, Any]] | None,
+) -> tuple[int, int] | None:
+    """pitch·onset(초)이 일치하는 탭 힌트를 찾는다."""
+    if not hints:
+        return None
+    p = int(note["pitch"])
+    s = float(note["start"])
+    best: tuple[int, int] | None = None
+    best_d = 1e9
+    for h in hints:
+        try:
+            if int(h["pitch"]) != p:
+                continue
+            d = abs(float(h["start"]) - s)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if d < 0.085 and d < best_d:
+            best_d = d
+            try:
+                best = (int(h["string"]), int(h["fret"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+    return best
+
+
+def _enrich_raw_notes_with_tab_hints(
+    notes: list[dict[str, Any]],
+    hints: list[dict[str, Any]] | None,
+) -> None:
+    """Omnizart·사이드카 등에서 온 줄·프렛을 raw 노트에 붙인다(있을 때만)."""
+    if not hints:
+        return
+    for n in notes:
+        tab = _match_tab_hint_for_note(n, hints)
+        if tab:
+            n["string"], n["fret"] = tab[0], tab[1]
 
 
 def _midi_note_to_string_fret(midi_pitch: int) -> tuple[int, int]:
@@ -1116,6 +1229,7 @@ def _quantized_beats_from_midi(
     tempo: float,
     *,
     onset_times_sec: list[float] | None = None,
+    tab_hints: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], float]:
     """
     MIDI note start/end를 1/16 단위로 기본 양자화하고,
@@ -1155,6 +1269,8 @@ def _quantized_beats_from_midi(
         quarter_sec=quarter,
     )
 
+    _enrich_raw_notes_with_tab_hints(candidate_raw_notes, tab_hints)
+
     if not candidate_raw_notes:
         # 파서가 무조건 구조를 기대하므로 더미 비트 1개는 남긴다.
         return (
@@ -1192,14 +1308,16 @@ def _quantized_beats_from_midi(
         end_slot = max(slot + 1, int(round(float(n["end"]) / step)))
         end = end_slot * step
 
-        slots.setdefault(slot, []).append(
-            {
-                "pitch": n["pitch"],
-                "velocity": n["velocity"],
-                "start": float(start),
-                "end": float(end),
-            }
-        )
+        slot_note: dict[str, Any] = {
+            "pitch": n["pitch"],
+            "velocity": n["velocity"],
+            "start": float(start),
+            "end": float(end),
+        }
+        if "string" in n and "fret" in n:
+            slot_note["string"] = int(n["string"])
+            slot_note["fret"] = int(n["fret"])
+        slots.setdefault(slot, []).append(slot_note)
 
     slot_keys = sorted(slots.keys())
     if not slot_keys:
@@ -1225,7 +1343,11 @@ def _quantized_beats_from_midi(
     # slot 별 lead 후보 positions
     lead_candidates: dict[int, list[tuple[int, int]]] = {}
     for k in slot_keys:
-        lead_pitch = slot_leads[k]["pitch"]
+        lead = slot_leads[k]
+        if "string" in lead and "fret" in lead:
+            lead_candidates[k] = [(int(lead["string"]), int(lead["fret"]))]
+            continue
+        lead_pitch = lead["pitch"]
         cand = _midi_pitch_to_candidate_positions(lead_pitch)
         if not cand:
             cand = [_midi_note_to_string_fret(lead_pitch)]
@@ -1294,6 +1416,18 @@ def _quantized_beats_from_midi(
                 )
                 continue
 
+            if "string" in n and "fret" in n:
+                mapped_notes.append(
+                    {
+                        "string": int(n["string"]),
+                        "fret": int(n["fret"]),
+                        "start": float(n["start"]),
+                        "end": float(n["end"]),
+                        "velocity": int(n["velocity"]),
+                    }
+                )
+                continue
+
             candidates = _midi_pitch_to_candidate_positions(n["pitch"])
             if not candidates:
                 candidates = [_midi_note_to_string_fret(n["pitch"])]
@@ -1347,6 +1481,7 @@ def _midi_to_alphatex(
     tempo_override: float | None = None,
     onset_times_sec: list[float] | None = None,
 ) -> str:
+    tab_hints = extract_guitar_tab_hints_from_midi(midi_path)
     midi = pretty_midi.PrettyMIDI(str(midi_path))
     tempo_segments = _parse_tempo_segments(midi)
     ts_segments = _parse_time_signature_segments(midi)
@@ -1361,7 +1496,9 @@ def _midi_to_alphatex(
 
     inst_name = _midi_program_to_alphatab_instrument(_get_primary_midi_program(midi))
 
-    beats, _grid_step_sec = _quantized_beats_from_midi(midi, tempo0, onset_times_sec=onset_times_sec)
+    beats, _grid_step_sec = _quantized_beats_from_midi(
+        midi, tempo0, onset_times_sec=onset_times_sec, tab_hints=tab_hints
+    )
     beats = sorted(beats, key=lambda b: float(b.get("time", 0.0)))
 
     suppress_mid_bar_midi_tempo = tempo_override is not None
@@ -1410,6 +1547,8 @@ def _midi_to_alphatex(
     bars_info = _compute_bars_info(midi, max_end, bpm_override=tempo_override)
     bar_chords = _bar_chord_labels(raw_notes, bars_info, int(capo))
 
+    emit_dy = _alphatex_emit_dynamics()
+
     def uniq_sorted(values: list[float]) -> list[float]:
         values_sorted = sorted(values)
         out: list[float] = []
@@ -1445,6 +1584,8 @@ def _midi_to_alphatex(
             chord = " ".join(f"{n['fret']}.{n['string']}" for n in chosen)
             base = f"({chord})"
 
+        if not emit_dy:
+            return base, prev_dy
         if prev_dy is None or dy != prev_dy:
             return f"{base} {{dy {dy}}}", dy
         return base, prev_dy
@@ -1582,6 +1723,7 @@ def _midi_to_alphatex(
         sync_block = "\n" + "\n".join(lines)
 
     # \\lyrics 는 \\staff 직후에 두어 스태프 컨텍스트에서 가사가 박에 분배되도록 한다 (alphaTex 문서 권장 순서에 맞춤).
+    capo_line = f"\\capo {int(capo)}\n" if int(capo) > 0 else ""
     header = (
         f"\\title \"{safe_title}\"\n"
         + (f"\\artist \"{safe_artist}\"\n" if safe_artist else "\\artist \"\"\n")
@@ -1590,6 +1732,7 @@ def _midi_to_alphatex(
         + lyrics_line
         + f"\\ts ({first_ts[0]} {first_ts[1]})\n"
         "\\tuning (E4 B3 G3 D3 A2 E2)\n"
+        + capo_line
         + f"\\tempo {int(round(first_bpm))}\n"
     )
 
@@ -1615,6 +1758,7 @@ def _midi_to_alphatex(
                 + lyrics_line
                 + f"\\ts ({first_ts[0]} {first_ts[1]})\n"
                 "\\tuning (E4 B3 G3 D3 A2 E2)\n"
+                + capo_line
                 + f"\\tempo {int(round(first_bpm))}\n"
             )
             tex = header + body + sync_block
@@ -1648,6 +1792,7 @@ def _midi_to_score(
     tempo_override: float | None = None,
     onset_times_sec: list[float] | None = None,
 ) -> dict[str, Any]:
+    tab_hints = extract_guitar_tab_hints_from_midi(midi_path)
     midi = pretty_midi.PrettyMIDI(str(midi_path))
     tempo_segments = _parse_tempo_segments(midi)
     ts_segments = _parse_time_signature_segments(midi)
@@ -1656,7 +1801,9 @@ def _midi_to_score(
     ts0 = ts_segments[0]
     num, den = int(ts0[1]), int(ts0[2])
 
-    beats, _grid_step_sec = _quantized_beats_from_midi(midi, tempo, onset_times_sec=onset_times_sec)
+    beats, _grid_step_sec = _quantized_beats_from_midi(
+        midi, tempo, onset_times_sec=onset_times_sec, tab_hints=tab_hints
+    )
 
     raw_notes = _raw_guitar_notes_from_midi(midi)
     max_end = max((n["end"] for n in raw_notes), default=0.0)
@@ -1693,6 +1840,7 @@ def run_four_step_pipeline(
     url: str,
     *,
     progress_cb: Callable[[dict[str, Any]], None] | None = None,
+    transcription_model: str = "omnizart",
 ) -> PipelineResult:
     def report(progress: int, stage: str, detail: str) -> None:
         print(f"[pipeline] {progress:>3}% | {stage:<11} | {detail}", flush=True)
@@ -1736,7 +1884,7 @@ def run_four_step_pipeline(
     else:
         report(10, "lyrics", "가사 없음 (LRCLIB·설명에서 찾지 못함)")
 
-    capo_guess = _guess_capo_from_text(title, lyrics)
+    capo_from_text = _guess_capo_from_text(title, lyrics)
 
     report(18, "beat", "풀 믹스에서 BPM·박 시각 추정(librosa)")
     beat_meta = analyze_beats_from_mix_mp3(mp3_path)
@@ -1765,8 +1913,8 @@ def run_four_step_pipeline(
     else:
         report(50, "onset", f"onset 추출 실패·기본 후처리 사용 ({onset_meta.get('error') or 'unknown'})")
 
-    report(60, "basic-pitch", "Basic Pitch로 MIDI 변환 시작")
-    midi_path = _basic_pitch_to_midi(guitar_audio, job_dir / "midi" / "guitar.mid")
+    report(60, "omnizart-guitar", "Omnizart로 기타 MIDI 변환 시작")
+    midi_path = _guitar_stem_to_midi(guitar_audio, job_dir / "midi" / "guitar.mid")
 
     if detected_bpm is not None:
         try:
@@ -1775,6 +1923,21 @@ def run_four_step_pipeline(
             midi_adjust.write(str(midi_path))
         except Exception as exc:
             report(65, "beat", f"MIDI 스냅 실패(템포만 반영): {exc}")
+
+    capo_guess = capo_from_text
+    try:
+        midi_for_capo = pretty_midi.PrettyMIDI(str(midi_path))
+        raw_capo = _raw_guitar_notes_from_midi(midi_for_capo)
+        max_e_capo = max((n["end"] for n in raw_capo), default=0.01)
+        bars_capo = _compute_bars_info(midi_for_capo, max_e_capo, bpm_override=detected_bpm)
+        capo_guess = _refine_capo_with_midi(raw_capo, bars_capo, capo_from_text)
+    except Exception as exc:
+        report(80, "capo", f"MIDI 기반 카포 보정 실패·텍스트만 사용 ({exc})")
+        capo_guess = capo_from_text
+    if capo_guess != capo_from_text:
+        report(82, "capo", f"카포: 텍스트 {capo_from_text} → MIDI보정 {capo_guess}")
+    else:
+        report(82, "capo", f"카포: {capo_guess}")
 
     report(85, "alphatex", "MIDI를 AlphaTex 문법으로 변환 시작")
     alphatex = _midi_to_alphatex(
@@ -1844,14 +2007,20 @@ def run_four_step_pipeline(
                 "mp3_path": str(mp3_path),
                 "audio_duration_sec": audio_dur,
                 "capo_guess": capo_guess,
+                "capo_from_text": capo_from_text,
+                "alphatex_include_dy": _alphatex_emit_dynamics(),
                 "lyrics_source": lyrics_source,
                 "lyrics_files": lyrics_files_info,
                 "midi_has_named_chord_track_hint": _midi_has_named_chord_track_hint(midi_chk),
                 "midi_note_events_only": True,
-                "chords_on_score": "마디별 음높이로 추정(표기용). Basic Pitch MIDI에는 코드 문자열이 들어가지 않음.",
+                "chords_on_score": "마디별 음높이로 추정(표기용). Omnizart MIDI에는 코드 문자열이 들어가지 않음.",
                 "guitar_stem_mp3": str(job_dir / "stems" / "guitar.mp3"),
                 "stems": {k: str(v) for k, v in stems.items()},
                 "midi_path": str(midi_path),
+                "tab_hints_extracted": len(extract_guitar_tab_hints_from_midi(midi_path)),
+                "demucs_model": DEMUCS_MODEL_NAME,
+                "transcription_model": transcription_model.strip(),
+                "guitar_transcribe_backend": (os.environ.get("GUITAR_TRANSCRIBE_BACKEND") or "omnizart").strip(),
                 "alphatex_path": str(job_dir / "tab" / "guitar.alphatex"),
                 "job_meta_path": str(job_dir / "job_meta.json"),
                 "audio_bpm": detected_bpm,

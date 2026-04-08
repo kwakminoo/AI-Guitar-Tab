@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "tab:learn": "node scripts/tab-learn.mjs"
   },
   "dependencies": {
     "@coderline/alphatab": "file:../vendor/alphaTab/packages/alphatab",

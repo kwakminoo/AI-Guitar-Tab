@@ -1,0 +1,12 @@
+{
+  "source": "lrclib_cache",
+  "char_count": 887,
+  "encoding": "utf-8",
+  "alphatex_lyrics_chars": 887,
+  "alphatex_lyrics_truncated": false,
+  "files": {
+    "plain_root": "data/jobs/yung-kai---blue-ea8342cb/lyrics.txt",
+    "plain_next_to_alphatex": "data/jobs/yung-kai---blue-ea8342cb/tab/lyrics.txt"
+  },
+  "alphatex_note": "guitar.alphatex 헤더의 \\\\lyrics 에 동일 가사가 들어가며, alphaTab이 박마다 음절을 배치한다. 문법: https://alphatab.net/docs/alphatex/metadata/staff/lyrics"
+}

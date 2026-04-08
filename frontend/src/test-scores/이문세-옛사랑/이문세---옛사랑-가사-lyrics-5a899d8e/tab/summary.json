@@ -1,0 +1,55 @@
+{
+  "url": "https://www.youtube.com/watch?v=n_dA3T2jWkI",
+  "mp3_path": "data\\jobs\\이문세---옛사랑-가사-lyrics-5a899d8e\\audio\\source.mp3",
+  "audio_duration_sec": 285.559021,
+  "capo_guess": 0,
+  "lyrics_source": "lrclib",
+  "lyrics_files": {
+    "saved": true,
+    "paths": {
+      "lyrics_txt": "data\\jobs\\이문세---옛사랑-가사-lyrics-5a899d8e\\lyrics.txt",
+      "tab_lyrics_txt": "data\\jobs\\이문세---옛사랑-가사-lyrics-5a899d8e\\tab\\lyrics.txt",
+      "tab_lyrics_json": "data\\jobs\\이문세---옛사랑-가사-lyrics-5a899d8e\\tab\\lyrics.json"
+    },
+    "source": "lrclib"
+  },
+  "midi_has_named_chord_track_hint": false,
+  "midi_note_events_only": true,
+  "chords_on_score": "마디별 음높이로 추정(표기용). Basic Pitch MIDI에는 코드 문자열이 들어가지 않음.",
+  "guitar_stem_mp3": "data\\jobs\\이문세---옛사랑-가사-lyrics-5a899d8e\\stems\\guitar.mp3",
+  "stems": {
+    "vocals": "data\\jobs\\이문세---옛사랑-가사-lyrics-5a899d8e\\stems\\vocals.mp3",
+    "drums": "data\\jobs\\이문세---옛사랑-가사-lyrics-5a899d8e\\stems\\drums.mp3",
+    "bass": "data\\jobs\\이문세---옛사랑-가사-lyrics-5a899d8e\\stems\\bass.mp3",
+    "other": "data\\jobs\\이문세---옛사랑-가사-lyrics-5a899d8e\\stems\\other.mp3",
+    "guitar": "data\\jobs\\이문세---옛사랑-가사-lyrics-5a899d8e\\stems\\guitar.mp3"
+  },
+  "midi_path": "data\\jobs\\이문세---옛사랑-가사-lyrics-5a899d8e\\midi\\guitar.mid",
+  "midi_by_stem": {
+    "vocals": "data\\jobs\\이문세---옛사랑-가사-lyrics-5a899d8e\\midi\\vocals.mid",
+    "bass": "data\\jobs\\이문세---옛사랑-가사-lyrics-5a899d8e\\midi\\bass.mid",
+    "other": "data\\jobs\\이문세---옛사랑-가사-lyrics-5a899d8e\\midi\\other.mid",
+    "guitar": "data\\jobs\\이문세---옛사랑-가사-lyrics-5a899d8e\\midi\\guitar.mid"
+  },
+  "midi_stem_rms": {
+    "vocals": 0.08557485044002533,
+    "drums": 0.00038223774754442275,
+    "bass": 0.09794170409440994,
+    "other": 0.06659679114818573
+  },
+  "midi_stem_rms_floor": 0.003917668163776398,
+  "midi_stem_skip_reasons": {
+    "drums": "melody_midi_excluded_instrument"
+  },
+  "melody_midi_stem_allowlist": [
+    "bass",
+    "guitar",
+    "other",
+    "piano",
+    "vocals"
+  ],
+  "alphatex_path": "data\\jobs\\이문세---옛사랑-가사-lyrics-5a899d8e\\tab\\guitar.alphatex",
+  "job_meta_path": "data\\jobs\\이문세---옛사랑-가사-lyrics-5a899d8e\\job_meta.json",
+  "audio_bpm": 129.19921875,
+  "beat_times_count": 601
+}

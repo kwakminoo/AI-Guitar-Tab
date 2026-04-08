@@ -1,0 +1,55 @@
+{
+  "url": "https://www.youtube.com/watch?v=zEI7rRZnHV0",
+  "mp3_path": "data\\jobs\\moonmoon-문문---비행운-contrail-가사-9ce18d26\\audio\\source.mp3",
+  "audio_duration_sec": 178.851708,
+  "capo_guess": 0,
+  "lyrics_source": "lrclib",
+  "lyrics_files": {
+    "saved": true,
+    "paths": {
+      "lyrics_txt": "data\\jobs\\moonmoon-문문---비행운-contrail-가사-9ce18d26\\lyrics.txt",
+      "tab_lyrics_txt": "data\\jobs\\moonmoon-문문---비행운-contrail-가사-9ce18d26\\tab\\lyrics.txt",
+      "tab_lyrics_json": "data\\jobs\\moonmoon-문문---비행운-contrail-가사-9ce18d26\\tab\\lyrics.json"
+    },
+    "source": "lrclib"
+  },
+  "midi_has_named_chord_track_hint": false,
+  "midi_note_events_only": true,
+  "chords_on_score": "마디별 음높이로 추정(표기용). Basic Pitch MIDI에는 코드 문자열이 들어가지 않음.",
+  "guitar_stem_mp3": "data\\jobs\\moonmoon-문문---비행운-contrail-가사-9ce18d26\\stems\\guitar.mp3",
+  "stems": {
+    "vocals": "data\\jobs\\moonmoon-문문---비행운-contrail-가사-9ce18d26\\stems\\vocals.mp3",
+    "drums": "data\\jobs\\moonmoon-문문---비행운-contrail-가사-9ce18d26\\stems\\drums.mp3",
+    "bass": "data\\jobs\\moonmoon-문문---비행운-contrail-가사-9ce18d26\\stems\\bass.mp3",
+    "other": "data\\jobs\\moonmoon-문문---비행운-contrail-가사-9ce18d26\\stems\\other.mp3",
+    "guitar": "data\\jobs\\moonmoon-문문---비행운-contrail-가사-9ce18d26\\stems\\guitar.mp3"
+  },
+  "midi_path": "data\\jobs\\moonmoon-문문---비행운-contrail-가사-9ce18d26\\midi\\guitar.mid",
+  "midi_by_stem": {
+    "vocals": "data\\jobs\\moonmoon-문문---비행운-contrail-가사-9ce18d26\\midi\\vocals.mid",
+    "bass": "data\\jobs\\moonmoon-문문---비행운-contrail-가사-9ce18d26\\midi\\bass.mid",
+    "other": "data\\jobs\\moonmoon-문문---비행운-contrail-가사-9ce18d26\\midi\\other.mid",
+    "guitar": "data\\jobs\\moonmoon-문문---비행운-contrail-가사-9ce18d26\\midi\\guitar.mid"
+  },
+  "midi_stem_rms": {
+    "vocals": 0.19550473988056183,
+    "drums": 0.013872970826923847,
+    "bass": 0.018661728128790855,
+    "other": 0.13432234525680542
+  },
+  "midi_stem_rms_floor": 0.007820189595222474,
+  "midi_stem_skip_reasons": {
+    "drums": "melody_midi_excluded_instrument"
+  },
+  "melody_midi_stem_allowlist": [
+    "bass",
+    "guitar",
+    "other",
+    "piano",
+    "vocals"
+  ],
+  "alphatex_path": "data\\jobs\\moonmoon-문문---비행운-contrail-가사-9ce18d26\\tab\\guitar.alphatex",
+  "job_meta_path": "data\\jobs\\moonmoon-문문---비행운-contrail-가사-9ce18d26\\job_meta.json",
+  "audio_bpm": 103.359375,
+  "beat_times_count": 290
+}

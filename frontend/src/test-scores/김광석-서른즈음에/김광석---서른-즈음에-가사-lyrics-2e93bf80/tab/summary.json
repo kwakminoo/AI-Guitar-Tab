@@ -1,0 +1,55 @@
+{
+  "url": "https://www.youtube.com/watch?v=jppOzsPUi3k",
+  "mp3_path": "data\\jobs\\김광석---서른-즈음에-가사-lyrics-2e93bf80\\audio\\source.mp3",
+  "audio_duration_sec": 281.959917,
+  "capo_guess": 0,
+  "lyrics_source": "lrclib_cache",
+  "lyrics_files": {
+    "saved": true,
+    "paths": {
+      "lyrics_txt": "data\\jobs\\김광석---서른-즈음에-가사-lyrics-2e93bf80\\lyrics.txt",
+      "tab_lyrics_txt": "data\\jobs\\김광석---서른-즈음에-가사-lyrics-2e93bf80\\tab\\lyrics.txt",
+      "tab_lyrics_json": "data\\jobs\\김광석---서른-즈음에-가사-lyrics-2e93bf80\\tab\\lyrics.json"
+    },
+    "source": "lrclib_cache"
+  },
+  "midi_has_named_chord_track_hint": false,
+  "midi_note_events_only": true,
+  "chords_on_score": "마디별 음높이로 추정(표기용). Basic Pitch MIDI에는 코드 문자열이 들어가지 않음.",
+  "guitar_stem_mp3": "data\\jobs\\김광석---서른-즈음에-가사-lyrics-2e93bf80\\stems\\guitar.mp3",
+  "stems": {
+    "vocals": "data\\jobs\\김광석---서른-즈음에-가사-lyrics-2e93bf80\\stems\\vocals.mp3",
+    "drums": "data\\jobs\\김광석---서른-즈음에-가사-lyrics-2e93bf80\\stems\\drums.mp3",
+    "bass": "data\\jobs\\김광석---서른-즈음에-가사-lyrics-2e93bf80\\stems\\bass.mp3",
+    "other": "data\\jobs\\김광석---서른-즈음에-가사-lyrics-2e93bf80\\stems\\other.mp3",
+    "guitar": "data\\jobs\\김광석---서른-즈음에-가사-lyrics-2e93bf80\\stems\\guitar.mp3"
+  },
+  "midi_path": "data\\jobs\\김광석---서른-즈음에-가사-lyrics-2e93bf80\\midi\\guitar.mid",
+  "midi_by_stem": {
+    "vocals": "data\\jobs\\김광석---서른-즈음에-가사-lyrics-2e93bf80\\midi\\vocals.mid",
+    "bass": "data\\jobs\\김광석---서른-즈음에-가사-lyrics-2e93bf80\\midi\\bass.mid",
+    "other": "data\\jobs\\김광석---서른-즈음에-가사-lyrics-2e93bf80\\midi\\other.mid",
+    "guitar": "data\\jobs\\김광석---서른-즈음에-가사-lyrics-2e93bf80\\midi\\guitar.mid"
+  },
+  "midi_stem_rms": {
+    "vocals": 0.07979145646095276,
+    "drums": 0.006850953213870525,
+    "bass": 0.07713747024536133,
+    "other": 0.0578744001686573
+  },
+  "midi_stem_rms_floor": 0.0031916582584381103,
+  "midi_stem_skip_reasons": {
+    "drums": "melody_midi_excluded_instrument"
+  },
+  "melody_midi_stem_allowlist": [
+    "bass",
+    "guitar",
+    "other",
+    "piano",
+    "vocals"
+  ],
+  "alphatex_path": "data\\jobs\\김광석---서른-즈음에-가사-lyrics-2e93bf80\\tab\\guitar.alphatex",
+  "job_meta_path": "data\\jobs\\김광석---서른-즈음에-가사-lyrics-2e93bf80\\job_meta.json",
+  "audio_bpm": 129.19921875,
+  "beat_times_count": 579
+}
