@@ -1,4 +1,5 @@
 import asyncio
+import json
 from urllib.parse import urlparse
 from typing import Any
 
@@ -52,6 +53,7 @@ class MidiTabPreviewResponse(BaseModel):
     title: str
     score: dict[str, Any]
     alphatex: str
+    tab_quality: dict[str, Any] | None = None
 
 
 class PipelineProgressResponse(BaseModel):
@@ -173,9 +175,19 @@ async def midi_tab_preview(file: UploadFile = File(...)) -> MidiTabPreviewRespon
         midi_path.write_bytes(data)
 
         title = Path(filename).stem or "Uploaded MIDI"
+        tab_q_dir = uploads_dir / "tab_preview" / Path(filename).stem
+        tab_q_dir.mkdir(parents=True, exist_ok=True)
         score = _midi_to_score(midi_path, title=title, capo=0)
-        alphatex = _midi_to_alphatex(midi_path, title=title, capo=0)
-        return MidiTabPreviewResponse(title=title, score=score, alphatex=alphatex)
+        alphatex = _midi_to_alphatex(
+            midi_path, title=title, capo=0, tab_output_dir=tab_q_dir
+        )
+        quality_path = tab_q_dir / "compare_report.json"
+        tab_quality: dict[str, Any] | None = None
+        if quality_path.is_file():
+            tab_quality = json.loads(quality_path.read_text(encoding="utf-8"))
+        return MidiTabPreviewResponse(
+            title=title, score=score, alphatex=alphatex, tab_quality=tab_quality
+        )
     except HTTPException:
         raise
     except Exception as exc:
