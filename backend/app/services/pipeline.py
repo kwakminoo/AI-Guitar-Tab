@@ -21,6 +21,7 @@ import pretty_midi
 from .beat_audio import analyze_beats_from_mix_mp3, analyze_onsets_from_guitar_audio, snap_midi_notes_to_sixteenth_grid
 from .lyrics_lrclib import fetch_lyrics_from_lrclib, parse_artist_and_track_from_youtube_title
 from .omnizart_guitar import extract_guitar_tab_hints_from_midi, transcribe_guitar_stem_to_midi
+from .tab_playback import refine_note_events_with_reference_midi, write_tab_compare_artifacts
 
 GUITAR_OPEN_MIDI = [64, 59, 55, 50, 45, 40]  # E4, B3, G3, D3, A2, E2
 GUITAR_MIN_PITCH = 40
@@ -595,6 +596,131 @@ def _bar_chord_labels(
             label = prev if prev else "?"
         out.append(label)
         prev = label
+    return out
+
+
+# AlphaTex \\chord ("이름" s1..s6): 1번줄(하이E) → 6번줄(로우E), x = 뮤트
+_CHORD_ALPHA_TEX_SHAPES: dict[str, tuple[Any, ...]] = {
+    "C": (0, 1, 0, 2, 3, "x"),
+    "Cm": (3, 4, 5, 5, 3, "x"),
+    "C7": (0, 1, 3, 2, 3, "x"),
+    "Cmaj7": (0, 0, 0, 2, 3, "x"),
+    "Cm7": (3, 4, 3, 5, 3, "x"),
+    "D": (2, 3, 2, 0, "x", "x"),
+    "Dm": (1, 3, 2, 0, "x", "x"),
+    "D7": (2, 1, 2, 0, "x", "x"),
+    "Dm7": (1, 1, 2, 0, "x", "x"),
+    "E": (0, 0, 1, 2, 2, 0),
+    "Em": (0, 0, 0, 2, 2, 0),
+    "E7": (0, 3, 1, 0, 2, 0),
+    "Em7": (0, 0, 0, 0, 2, 0),
+    "F": (1, 1, 2, 3, 3, 1),
+    "Fm": (1, 1, 1, 3, 3, 1),
+    "F7": (1, 1, 2, 1, 3, 1),
+    "Fm7": (1, 1, 1, 3, 3, 1),
+    "Fmaj7": (0, 1, 2, 3, "x", "x"),
+    "G": (3, 3, 0, 0, 2, 3),
+    "Gm": (3, 3, 0, 0, 1, 3),
+    "G7": (1, 0, 0, 0, 2, 3),
+    "Gm7": (3, 3, 3, 3, 1, 3),
+    "A": (0, 2, 2, 2, 0, "x"),
+    "Am": (0, 1, 2, 2, 0, "x"),
+    "A7": (0, 2, 0, 2, 0, "x"),
+    "Am7": (0, 1, 0, 2, 0, "x"),
+    "Amaj7": (0, 2, 1, 2, 0, "x"),
+    "B": (2, 2, 2, 1, 0, "x"),
+    "Bm": (2, 3, 4, 4, 2, "x"),
+    "B7": (2, 0, 1, 2, 0, 2),
+    "Bm7": (2, 0, 2, 2, 2, "x"),
+    "Bb": (1, 3, 3, 3, 1, "x"),
+    "Bbm": (1, 1, 3, 3, 2, "x"),
+    "Eb": (3, 3, 3, 1, 1, 1),
+    "Ebm": (2, 4, 4, 4, 2, "x"),
+    "Ab": (1, 1, 1, 3, 4, 4),
+    "Abm": (1, 1, 1, 3, 2, 4),
+}
+
+
+def _normalize_chord_label_for_shape_lookup(label: str) -> str:
+    s = (label or "").strip()
+    if not s or s == "?":
+        return ""
+    repl = {"Db": "C#", "Eb": "D#", "Gb": "F#", "Ab": "G#", "Bb": "A#"}
+    for k, v in repl.items():
+        if s.startswith(k) and (len(s) == len(k) or not s[len(k) : len(k) + 1].isalpha()):
+            s = v + s[len(k) :]
+            break
+    return s
+
+
+def _chord_shape_tuple_for_label(label: str) -> tuple[Any, ...] | None:
+    key = _normalize_chord_label_for_shape_lookup(label)
+    if not key:
+        return None
+    if key in _CHORD_ALPHA_TEX_SHAPES:
+        return _CHORD_ALPHA_TEX_SHAPES[key]
+    if label.strip() in _CHORD_ALPHA_TEX_SHAPES:
+        return _CHORD_ALPHA_TEX_SHAPES[label.strip()]
+    return None
+
+
+def _alphatex_chord_definitions_block(ordered_labels: list[str]) -> str:
+    lines: list[str] = []
+    for name in ordered_labels:
+        shape = _chord_shape_tuple_for_label(name)
+        if shape is None:
+            continue
+        esc = _escape_alpha_tex_string(name)
+        parts = " ".join("x" if (x == "x" or x == "X") else str(int(x)) for x in shape)
+        lines.append(f'\\chord ("{esc}" {parts})')
+    return ("\n".join(lines) + "\n") if lines else ""
+
+
+def _tab_snapshot_key(
+    note_events: list[dict[str, Any]],
+    t0: float,
+    eps: float,
+) -> tuple[tuple[int, int], ...]:
+    active = [n for n in note_events if n["start"] <= t0 + eps and n["end"] > t0 + eps]
+    if not active:
+        return tuple()
+    by_string: dict[int, dict[str, Any]] = {}
+    for n in active:
+        s = int(n["string"])
+        existing = by_string.get(s)
+        if existing is None:
+            by_string[s] = n
+            continue
+        if (n["velocity"], -n["fret"]) > (existing["velocity"], -existing["fret"]):
+            by_string[s] = n
+    chosen = sorted(by_string.values(), key=lambda x: (x["string"], x["fret"]))
+    return tuple((int(n["string"]), int(n["fret"])) for n in chosen)
+
+
+def _strip_dy_from_alphatex_note_token(s: str) -> str:
+    return re.sub(r"\s+\{dy\s+[^}]+\}\s*$", "", s).strip()
+
+
+def _greedy_decompose_duration_units(units: float) -> list[int]:
+    """16분음표 단위 길이를 :1..:32 토큰 분모 리스트로 분해한다."""
+    dens_order = [1, 2, 4, 8, 16, 32]
+    rem = float(units)
+    out: list[int] = []
+    eps = 1e-3
+    guard = 0
+    while rem > eps and guard < 20000:
+        guard += 1
+        placed = False
+        for den in dens_order:
+            u = 16.0 / den
+            if rem + 1e-6 >= u:
+                out.append(den)
+                rem -= u
+                placed = True
+                break
+        if not placed:
+            out.append(32)
+            rem -= 0.5
     return out
 
 
@@ -1480,6 +1606,7 @@ def _midi_to_alphatex(
     capo: int = 0,
     tempo_override: float | None = None,
     onset_times_sec: list[float] | None = None,
+    tab_output_dir: Path | None = None,
 ) -> str:
     tab_hints = extract_guitar_tab_hints_from_midi(midi_path)
     midi = pretty_midi.PrettyMIDI(str(midi_path))
@@ -1520,21 +1647,12 @@ def _midi_to_alphatex(
                 }
             )
 
+    if note_events:
+        note_events, _ref_passes = refine_note_events_with_reference_midi(
+            note_events, midi_path, max_passes=2
+        )
+
     base_den = 16
-
-    def duration_seconds_to_den(duration_sec: float, base_unit_sec_: float) -> int:
-        units = duration_sec / max(1e-9, base_unit_sec_)
-        allowed = [32, 16, 8, 4, 2, 1]
-        best_den = 16
-        best_diff = float("inf")
-        for cand_den in allowed:
-            cand_units = 16 / cand_den
-            diff = abs(cand_units - units)
-            if diff < best_diff:
-                best_diff = diff
-                best_den = int(cand_den)
-        return int(best_den)
-
     eps = 1e-6
 
     ts_pairs: list[tuple[float, tuple[int, int]]] = [(t, (n, d)) for t, n, d in ts_segments]
@@ -1546,6 +1664,14 @@ def _midi_to_alphatex(
     # 가변 마디 길이(박자표·템포) 타임라인
     bars_info = _compute_bars_info(midi, max_end, bpm_override=tempo_override)
     bar_chords = _bar_chord_labels(raw_notes, bars_info, int(capo))
+    chord_order_unique: list[str] = []
+    _seen_ch: set[str] = set()
+    for _lbl in bar_chords:
+        if _lbl not in _seen_ch:
+            _seen_ch.add(_lbl)
+            chord_order_unique.append(_lbl)
+    chord_def_block = _alphatex_chord_definitions_block(chord_order_unique)
+    capo_line = f"\\capo {int(capo)}\n" if int(capo) > 0 else ""
 
     emit_dy = _alphatex_emit_dynamics()
 
@@ -1591,7 +1717,6 @@ def _midi_to_alphatex(
         return base, prev_dy
 
     bars: list[str] = []
-    prev_dy: str | None = None
 
     first_ts = _segment_value_at(ts_pairs, 0.0, (4, 4))
     first_bpm = (
@@ -1661,48 +1786,92 @@ def _midi_to_alphatex(
         bar_units = 0.0
         bar_idx += 1
 
+    # 동일 운지가 이어지는 구간을 병합한 뒤, 16분 단위로 그리디 분해해 토큰을 만든다.
+    prev_dy_m: str | None = None
+    raw_chunks: list[tuple[float, float, tuple[tuple[int, int], ...], str, str]] = []
     for idx in range(len(sorted_boundaries) - 1):
-        t0 = float(sorted_boundaries[idx])
-        t1 = float(sorted_boundaries[idx + 1])
-        if t1 <= t0 + eps:
+        t0b = float(sorted_boundaries[idx])
+        t1b = float(sorted_boundaries[idx + 1])
+        if t1b <= t0b + eps:
             continue
+        snap = _tab_snapshot_key(note_events, t0b, eps)
+        full_tok, prev_dy_m = active_content_with_dy(t0b, prev_dy_m)
+        base_tok = _strip_dy_from_alphatex_note_token(full_tok)
+        raw_chunks.append((t0b, t1b, snap, full_tok, base_tok))
 
-        while bar_idx < len(bars_info) and t0 >= bars_info[bar_idx][1] - eps:
-            if bar_tokens:
-                flush_bar()
-            else:
-                bar_idx += 1
+    merged_rows: list[list[Any]] = []
+    for t0b, t1b, snap, full_tok, base_tok in raw_chunks:
+        if merged_rows and snap == merged_rows[-1][2] and abs(t0b - merged_rows[-1][1]) < 1e-5:
+            merged_rows[-1][1] = t1b
+        else:
+            merged_rows.append([t0b, t1b, snap, full_tok, base_tok])
 
-        if bar_idx >= len(bars_info):
-            break
+    first_note_in_row: list[bool] = [True]
 
-        bs, be, num, den, bpm, measure_units_target = bars_info[bar_idx]
-        base_unit_sec = (60.0 / max(20.0, bpm)) / 4.0
+    def emit_units_slice(total_units: float, first_full: str, base_only: str) -> None:
+        nonlocal bar_idx, bar_tokens, bar_units
+        rem_u = float(total_units)
+        guard = 0
+        while rem_u > 1e-6:
+            guard += 1
+            if guard > 500_000 or bar_idx >= len(bars_info):
+                return
+            measure_units_target = float(bars_info[bar_idx][5])
+            room = measure_units_target - float(bar_units)
+            if room <= 1e-9:
+                if bar_tokens:
+                    flush_bar()
+                else:
+                    bar_idx += 1
+                continue
+            den_found: int | None = None
+            nu = 0.0
+            for d in (1, 2, 4, 8, 16, 32):
+                nn = 16.0 / d
+                if nn <= rem_u + 1e-6 and nn <= room + 1e-6:
+                    den_found = d
+                    nu = nn
+                    break
+            if den_found is None:
+                den_found = 32
+                nu = 0.5
+                if nu > room + 1e-6:
+                    if bar_tokens:
+                        flush_bar()
+                    elif bar_idx + 1 < len(bars_info):
+                        bar_idx += 1
+                    else:
+                        return
+                    continue
+            piece = first_full if first_note_in_row[0] else base_only
+            first_note_in_row[0] = False
+            tok = f":{den_found} {piece}" if den_found != base_den else piece
+            bar_tokens.append(tok)
+            bar_units += nu
+            rem_u -= nu
 
-        duration_sec = max(0.0, t1 - t0)
-        den_value = duration_seconds_to_den(duration_sec, base_unit_sec)
-        seg_units = 16 / max(1, den_value)
-
-        if bar_units + seg_units > measure_units_target + 1e-6 and bar_tokens:
-            flush_bar()
+    for row in merged_rows:
+        st, en, _snap, first_full, base_only = row[0], row[1], row[2], row[3], row[4]
+        ct = float(st)
+        first_note_in_row[0] = True
+        while ct < float(en) - eps and bar_idx < len(bars_info):
+            while bar_idx < len(bars_info) and ct >= bars_info[bar_idx][1] - eps:
+                if bar_tokens:
+                    flush_bar()
+                else:
+                    bar_idx += 1
             if bar_idx >= len(bars_info):
                 break
-            bs, be, num, den, bpm, measure_units_target = bars_info[bar_idx]
-            base_unit_sec = (60.0 / max(20.0, bpm)) / 4.0
-
-        if bar_units + seg_units > measure_units_target + 1e-6:
-            seg_units = max(0.0, measure_units_target - bar_units)
-            if seg_units <= 1e-9:
+            bs_r, be_r, _nr, _dr, bpm_r, measure_units_target = bars_info[bar_idx]
+            base_unit_sec = (60.0 / max(20.0, bpm_r)) / 4.0
+            chunk_end = min(float(en), float(be_r))
+            chunk_sec = max(0.0, chunk_end - ct)
+            if chunk_sec <= eps:
+                ct = chunk_end
                 continue
-
-        content, prev_dy = active_content_with_dy(t0, prev_dy)
-        if den_value != base_den:
-            beat_token = f":{den_value} {content}"
-        else:
-            beat_token = content
-
-        bar_tokens.append(beat_token)
-        bar_units += seg_units
+            units_chunk = chunk_sec / base_unit_sec
+            emit_units_slice(units_chunk, first_full, base_only)
+            ct = chunk_end
 
     if bar_tokens:
         flush_bar()
@@ -1722,7 +1891,7 @@ def _midi_to_alphatex(
             lines.append(f"\\sync {i} 0 {ms}")
         sync_block = "\n" + "\n".join(lines)
 
-    # \\lyrics 는 \\staff 직후에 두어 스태프 컨텍스트에서 가사가 박에 분배되도록 한다 (alphaTex 문서 권장 순서에 맞춤).
+    # \\lyrics 는 \\staff 직후(스태프 컨텍스트). 이어서 \\chord 정의 → capo → 박자/튜닝/템포.
     capo_line = f"\\capo {int(capo)}\n" if int(capo) > 0 else ""
     header = (
         f"\\title \"{safe_title}\"\n"
@@ -1730,6 +1899,8 @@ def _midi_to_alphatex(
         + f'\\track "Guitar" {{ instrument "{inst_name}" }}\n'
         "\\staff {score tabs}\n"
         + lyrics_line
+        + chord_def_block
+        + capo_line
         + f"\\ts ({first_ts[0]} {first_ts[1]})\n"
         "\\tuning (E4 B3 G3 D3 A2 E2)\n"
         + capo_line
@@ -1746,6 +1917,13 @@ def _midi_to_alphatex(
         token_ok = bool(diag.get("tokenGuard", {}).get("ok", True))
         has_errors = bool(diag.get("hasErrors", False))
         if token_ok and not has_errors:
+            if tab_output_dir is not None and note_events:
+                try:
+                    write_tab_compare_artifacts(
+                        midi_path, note_events, tab_output_dir, refine=False
+                    )
+                except OSError:
+                    pass
             return tex
 
         if attempt == 0 and _should_retry_after_alphatex_diagnostics(diag):
@@ -1756,6 +1934,8 @@ def _midi_to_alphatex(
                 + f'\\track "Guitar" {{ instrument "{inst_name}" }}\n'
                 "\\staff {score tabs}\n"
                 + lyrics_line
+                + chord_def_block
+                + capo_line
                 + f"\\ts ({first_ts[0]} {first_ts[1]})\n"
                 "\\tuning (E4 B3 G3 D3 A2 E2)\n"
                 + capo_line
@@ -1949,6 +2129,7 @@ def run_four_step_pipeline(
         capo=capo_guess,
         tempo_override=detected_bpm,
         onset_times_sec=onset_times_out,
+        tab_output_dir=job_dir / "tab",
     )
     score = _midi_to_score(
         midi_path,
@@ -2022,6 +2203,8 @@ def run_four_step_pipeline(
                 "transcription_model": transcription_model.strip(),
                 "guitar_transcribe_backend": (os.environ.get("GUITAR_TRANSCRIBE_BACKEND") or "omnizart").strip(),
                 "alphatex_path": str(job_dir / "tab" / "guitar.alphatex"),
+                "tab_from_tab_midi": str(job_dir / "tab" / "tab_from_tab.mid"),
+                "tab_compare_report": str(job_dir / "tab" / "compare_report.json"),
                 "job_meta_path": str(job_dir / "job_meta.json"),
                 "audio_bpm": detected_bpm,
                 "beat_times_count": len(beat_times_out) if detected_bpm is not None else 0,
