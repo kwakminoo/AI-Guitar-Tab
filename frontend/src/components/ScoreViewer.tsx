@@ -13,9 +13,6 @@ import {
 
 export type { AlphaTabScore } from "@/types/alphatabScore";
 
-/** 유튜브 파이프라인 MIDI 전사 백엔드 선택 (미구현 모델은 API 501). */
-export type TranscriptionModelId = "omnizart" | "tabcnn" | "guitartab_architecture";
-
 /** 개발 시 src의 .atex 를 서버가 읽어 반환 (저장 후 새로고침 시 최신 반영). 실패 시 public 정적 파일로 폴백. */
 const TEST_SCORE_API_URL = TEST_SCORE_API_PATH;
 
@@ -320,8 +317,6 @@ interface ScoreViewerProps {
   youtubeUrl?: string;
   onYoutubeUrlChange?: (value: string) => void;
   onAnalyze?: () => void;
-  transcriptionModel?: TranscriptionModelId;
-  onTranscriptionModelChange?: (value: TranscriptionModelId) => void;
   isAnalyzing?: boolean;
   statusMessage?: string | null;
   analyzeError?: string | null;
@@ -337,8 +332,6 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
   youtubeUrl = "",
   onYoutubeUrlChange,
   onAnalyze,
-  transcriptionModel = "omnizart",
-  onTranscriptionModelChange,
   isAnalyzing = false,
   statusMessage,
   analyzeError,
@@ -496,7 +489,7 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
         : mergeLyricsIntoAlphaTex(sourceTex || FALLBACK_EMPTY_TAB_ALPHATEX, lyricsForStaff || null);
 
     (async () => {
-      const alphaTab = await loadAlphaTabUmd();
+      const alphaTab = await loadAlphaTabModule();
       if (disposed || !mainRef.current) return;
       alphaTabModuleRef.current = alphaTab;
 
@@ -511,12 +504,11 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
       settings.display.barCountPerPartial = 8;
       settings.display.justifyLastSystem = true;
       settings.display.stretchForce = isStudyMode ? 0.92 : 1;
-      // 우선 렌더 안정화를 위해 워커를 끄고 메인 스레드 렌더만 사용한다.
-      settings.core.useWorkers = false;
+      // ESM 로드 시 합성·워커 경로(BrowserModule) 사용 — scriptFile 은 덮어쓰지 않음.
+      settings.core.useWorkers = true;
       settings.core.enableLazyLoading = true;
       settings.core.includeNoteBounds = isStudyMode;
       settings.core.engine = "svg";
-      settings.core.scriptFile = `${ALPHATAB_LOCAL_DIST}/alphaTab.js`;
       settings.core.fontDirectory = `${ALPHATAB_LOCAL_DIST}/font/`;
       // 개발 중 콘솔 노이즈를 줄이고, 프로덕션에서만 경고 이상 로그를 남긴다.
       settings.core.logLevel = process.env.NODE_ENV === "development" ? 2 : 3;
@@ -546,9 +538,8 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
       if (NE?.EffectLyrics !== undefined && notationElements) {
         notationElements.set(NE.EffectLyrics, true);
       }
-      // AlphaSynth/WebWorker 초기화 오류가 UI 전체 렌더를 막지 않도록 렌더 우선 모드로 둔다.
-      settings.player.enablePlayer = false;
-      settings.player.enableCursor = false;
+      settings.player.enablePlayer = true;
+      settings.player.enableCursor = true;
       settings.player.enableElementHighlighting = true;
       settings.player.enableAnimatedBeatCursor = true;
       settings.player.enableUserInteraction = allowSeekByClick;
@@ -1082,35 +1073,6 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
             {analyzeError ? (
               <p className="text-[11px] leading-snug text-red-600">{analyzeError}</p>
             ) : null}
-            <div className="mt-3 space-y-2 rounded-lg border border-zinc-200 bg-white p-2">
-              <p className="text-[11px] font-semibold text-zinc-700">MIDI 전사 모델</p>
-              <p className="text-[10px] leading-snug text-zinc-500">
-                스템→MIDI→알파택스 파이프라인에서 사용할 모델을 고릅니다.
-              </p>
-              <div className="flex flex-col gap-1">
-                {(
-                  [
-                    { id: "omnizart" as const, label: "Omnizart" },
-                    { id: "tabcnn" as const, label: "TabCNN" },
-                    { id: "guitartab_architecture" as const, label: "GuitarTab-Architecture" },
-                  ] as const
-                ).map((opt) => (
-                  <button
-                    key={opt.id}
-                    type="button"
-                    aria-pressed={transcriptionModel === opt.id}
-                    onClick={() => onTranscriptionModelChange?.(opt.id)}
-                    className={`rounded-md border px-2 py-1.5 text-left text-[11px] font-medium transition ${
-                      transcriptionModel === opt.id
-                        ? "border-zinc-900 bg-zinc-900 text-white"
-                        : "border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100"
-                    }`}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
-            </div>
           </div>
 
           <div className="flex min-h-0 flex-1 flex-col px-3 pt-3">
@@ -1936,47 +1898,31 @@ function normalizeScoreForRendering(score: AlphaTabScore): AlphaTabScore | null 
 
 let alphaTabLoadPromise: Promise<AlphaTabModuleLike> | null = null;
 
-function loadAlphaTabUmd(): Promise<AlphaTabModuleLike> {
+function normalizeAlphaTabModule(mod: unknown): AlphaTabModuleLike {
+  const record = mod as Record<string, unknown>;
+  if (typeof record.AlphaTabApi === "function" && typeof record.Settings === "function" && record.synth) {
+    return mod as AlphaTabModuleLike;
+  }
+  const inner = record.default as Record<string, unknown> | undefined;
+  if (inner && typeof inner.AlphaTabApi === "function" && typeof inner.Settings === "function" && inner.synth) {
+    return inner as unknown as AlphaTabModuleLike;
+  }
+  throw new Error("alphaTab.mjs 에서 AlphaTabApi/Settings/synth 바인딩을 찾지 못했습니다.");
+}
+
+/** ESM 엔트리(워커·합성 경로). UMD 전역 로드는 사용하지 않는다. */
+function loadAlphaTabModule(): Promise<AlphaTabModuleLike> {
   if (typeof window === "undefined") {
     return Promise.reject(new Error("브라우저 환경에서만 alphaTab을 로드할 수 있습니다."));
   }
-
   if (alphaTabLoadPromise) return alphaTabLoadPromise;
-
-  alphaTabLoadPromise = new Promise<AlphaTabModuleLike>((resolve, reject) => {
-    const globalAt = (window as unknown as { alphaTab?: AlphaTabModuleLike }).alphaTab;
-    if (globalAt) {
-      resolve(globalAt);
-      return;
-    }
-
-    const existing = document.getElementById("alphatab-local-script") as HTMLScriptElement | null;
-    if (existing) {
-      existing.addEventListener("load", () => {
-        const loaded = (window as unknown as { alphaTab?: AlphaTabModuleLike }).alphaTab;
-        if (loaded) resolve(loaded);
-        else reject(new Error("alphaTab 스크립트는 로드되었지만 전역 객체가 없습니다."));
-      });
-      existing.addEventListener("error", () => {
-        reject(new Error(`alphaTab 스크립트 로드에 실패했습니다: ${existing.src}`));
-      });
-      return;
-    }
-
-    const script = document.createElement("script");
-    script.id = "alphatab-local-script";
-    script.async = true;
-    script.src = `${ALPHATAB_LOCAL_DIST}/alphaTab.js`;
-    script.onload = () => {
-      const loaded = (window as unknown as { alphaTab?: AlphaTabModuleLike }).alphaTab;
-      if (loaded) resolve(loaded);
-      else reject(new Error("alphaTab 스크립트는 로드되었지만 전역 객체가 없습니다."));
-    };
-    script.onerror = () => {
-      reject(new Error(`alphaTab 스크립트 로드에 실패했습니다: ${script.src}`));
-    };
-    document.head.appendChild(script);
-  });
-
+  const origin = window.location.origin;
+  const url = `${origin}${ALPHATAB_LOCAL_DIST}/alphaTab.mjs`;
+  alphaTabLoadPromise = import(/* webpackIgnore: true */ /* @vite-ignore */ url)
+    .then(normalizeAlphaTabModule)
+    .catch((err: unknown) => {
+      alphaTabLoadPromise = null;
+      throw err;
+    });
   return alphaTabLoadPromise;
 }

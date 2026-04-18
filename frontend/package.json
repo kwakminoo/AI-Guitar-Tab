@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "alphatab:copy": "node scripts/copy-alphatab-assets.mjs",
+    "postinstall": "node scripts/copy-alphatab-assets.mjs",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",

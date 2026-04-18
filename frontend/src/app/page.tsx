@@ -1,10 +1,6 @@
 "use client";
 
-import {
-  ScoreViewer,
-  type AlphaTabScore,
-  type TranscriptionModelId,
-} from "@/components/ScoreViewer";
+import { ScoreViewer, type AlphaTabScore } from "@/components/ScoreViewer";
 import { useRef, useState } from "react";
 
 type SongMeta = {
@@ -41,7 +37,6 @@ export default function Home() {
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analyzeProgress, setAnalyzeProgress] = useState<number | null>(null);
-  const [transcriptionModel, setTranscriptionModel] = useState<TranscriptionModelId>("omnizart");
   /** 백엔드 진행 스냅샷이 바뀔 때만 UI 갱신(불필요한 리렌더·로딩바 깜빡임 방지) */
   const lastProgressSnapshotRef = useRef<string>("");
 
@@ -92,7 +87,6 @@ export default function Home() {
         body: JSON.stringify({
           url: url.trim(),
           jobId,
-          transcriptionModel,
         }),
       });
 
@@ -177,8 +171,6 @@ export default function Home() {
           youtubeUrl={url}
           onYoutubeUrlChange={setUrl}
           onAnalyze={handleAnalyze}
-          transcriptionModel={transcriptionModel}
-          onTranscriptionModelChange={setTranscriptionModel}
           isAnalyzing={isAnalyzing}
           statusMessage={status}
           analyzeError={errorDetail}

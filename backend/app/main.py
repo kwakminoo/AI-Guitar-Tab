@@ -2,7 +2,7 @@ import asyncio
 import json
 from urllib.parse import urlparse
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,13 +28,9 @@ app.add_middleware(
 )
 
 
-TranscriptionModelId = Literal["omnizart", "tabcnn", "guitartab_architecture"]
-
-
 class PipelineRequest(BaseModel):
     url: HttpUrl
     jobId: str | None = None
-    transcriptionModel: TranscriptionModelId = "omnizart"
 
 
 def _is_supported_youtube_url(raw_url: str) -> bool:
@@ -90,11 +86,6 @@ async def youtube_tab_preview(payload: PipelineRequest) -> YoutubeTabPreviewResp
     try:
         if not _is_supported_youtube_url(str(payload.url)):
             raise HTTPException(status_code=400, detail="유튜브 URL만 지원합니다.")
-        if payload.transcriptionModel != "omnizart":
-            raise HTTPException(
-                status_code=501,
-                detail="TabCNN·GuitarTab-Architecture 전사는 아직 연결되지 않았습니다. Omnizart를 선택해 주세요.",
-            )
         _PIPELINE_PROGRESS[progress_id] = {
             "progress": 0,
             "stage": "queued",
@@ -117,7 +108,6 @@ async def youtube_tab_preview(payload: PipelineRequest) -> YoutubeTabPreviewResp
                 run_four_step_pipeline,
                 str(payload.url),
                 progress_cb=_on_progress,
-                transcription_model=payload.transcriptionModel,
             ),
             timeout=1800.0,
         )

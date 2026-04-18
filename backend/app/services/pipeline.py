@@ -18,9 +18,9 @@ from typing import Any, Callable
 
 import pretty_midi
 
-from .beat_audio import analyze_beats_from_mix_mp3, analyze_onsets_from_guitar_audio, snap_midi_notes_to_sixteenth_grid
+from .beat_audio import analyze_onsets_from_guitar_audio, snap_midi_notes_to_sixteenth_grid
 from .lyrics_lrclib import fetch_lyrics_from_lrclib, parse_artist_and_track_from_youtube_title
-from .omnizart_guitar import extract_guitar_tab_hints_from_midi, transcribe_guitar_stem_to_midi
+from .omnizart_guitar import extract_guitar_tab_hints_from_midi
 from .tab_playback import refine_note_events_with_reference_midi, write_tab_compare_artifacts
 
 GUITAR_OPEN_MIDI = [64, 59, 55, 50, 45, 40]  # E4, B3, G3, D3, A2, E2
@@ -1143,10 +1143,42 @@ def _separate_demucs(mp3_path: Path, out_dir: Path) -> dict[str, Path]:
     return stems
 
 
+def _ffmpeg_mp3_to_wav_mono_44k(src_mp3: Path, dst_wav: Path) -> Path:
+    """기타 스템 MP3를 Basic Pitch 입력용 WAV(모노 44.1kHz)로 변환한다."""
+    dst_wav.parent.mkdir(parents=True, exist_ok=True)
+    _run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(src_mp3),
+            "-ac",
+            "1",
+            "-ar",
+            "44100",
+            "-f",
+            "wav",
+            str(dst_wav),
+        ]
+    )
+    if not dst_wav.is_file():
+        raise RuntimeError(f"ffmpeg가 WAV를 생성하지 못했습니다: {dst_wav}")
+    return dst_wav
+
+
+def _primary_bpm_from_midi(midi: pretty_midi.PrettyMIDI) -> float:
+    """MIDI 템포 이벤트에서 QPM을 읽는다. 없거나 비정상이면 120."""
+    segs = _parse_tempo_segments(midi)
+    bpm = float(segs[0][1]) if segs else 120.0
+    if not math.isfinite(bpm) or bpm <= 0:
+        bpm = 120.0
+    return max(20.0, min(300.0, bpm))
+
+
 def _ensure_flat_guitar_stem_mp3(stems: dict[str, Path], stems_root: Path) -> Path:
     """
     `guitar` 스템이 있으면 그대로 사용하고, 없으면(4스템 모델 등) `other`를 기타 트랙으로 복사한다.
-    Omnizart/Basic Pitch·onset 입력은 항상 `stems/guitar.mp3`를 가리키게 한다.
+    Basic Pitch·onset 전처리는 항상 `stems/guitar.mp3`를 가리키게 한다.
     """
     src = stems.get("guitar") or stems.get("other")
     if not src or not src.is_file():
@@ -1163,25 +1195,24 @@ def _ensure_flat_guitar_stem_mp3(stems: dict[str, Path], stems_root: Path) -> Pa
 
 
 def _basic_pitch_to_midi(guitar_audio: Path, midi_out: Path) -> Path:
+    """기타 WAV(또는 오디오) → Basic Pitch → `midi_out` 경로로 정리."""
     midi_out.parent.mkdir(parents=True, exist_ok=True)
     _run([sys.executable, "-m", "basic_pitch.predict", str(midi_out.parent), str(guitar_audio)])
-    produced = sorted(midi_out.parent.glob("*.mid"))
+    expected = midi_out.parent / f"{guitar_audio.stem}.mid"
+    if expected.is_file():
+        if expected.resolve() != midi_out.resolve():
+            shutil.move(str(expected), str(midi_out))
+        return midi_out
+    produced = sorted(midi_out.parent.glob("*.mid"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not produced:
         raise RuntimeError("Basic Pitch 변환 결과 MIDI 파일을 찾지 못했습니다.")
-    produced[0].replace(midi_out)
+    shutil.move(str(produced[0]), str(midi_out))
     return midi_out
 
 
-def _guitar_stem_to_midi(guitar_audio: Path, midi_out: Path) -> Path:
-    """
-    기타 스템 → MIDI. 기본은 Omnizart(Pop 등). `GUITAR_TRANSCRIBE_BACKEND=basic_pitch` 이면 예전 Basic Pitch 경로.
-    """
-    backend = (os.environ.get("GUITAR_TRANSCRIBE_BACKEND") or "omnizart").strip().lower()
-    if backend in ("basic_pitch", "basic-pitch", "bp"):
-        return _basic_pitch_to_midi(guitar_audio, midi_out)
-    if backend in ("omnizart", "omni", "guitar"):
-        return transcribe_guitar_stem_to_midi(guitar_audio, midi_out)
-    raise ValueError(f"지원하지 않는 GUITAR_TRANSCRIBE_BACKEND: {backend!r}")
+def _guitar_wav_to_midi_basic_pitch(guitar_wav: Path, midi_out: Path) -> Path:
+    """기타 스템 WAV → Basic Pitch MIDI."""
+    return _basic_pitch_to_midi(guitar_wav, midi_out)
 
 
 def _match_tab_hint_for_note(
@@ -2020,7 +2051,6 @@ def run_four_step_pipeline(
     url: str,
     *,
     progress_cb: Callable[[dict[str, Any]], None] | None = None,
-    transcription_model: str = "omnizart",
 ) -> PipelineResult:
     def report(progress: int, stage: str, detail: str) -> None:
         print(f"[pipeline] {progress:>3}% | {stage:<11} | {detail}", flush=True)
@@ -2066,50 +2096,42 @@ def run_four_step_pipeline(
 
     capo_from_text = _guess_capo_from_text(title, lyrics)
 
-    report(18, "beat", "풀 믹스에서 BPM·박 시각 추정(librosa)")
-    beat_meta = analyze_beats_from_mix_mp3(mp3_path)
-    detected_bpm: float | None = None
-    beat_times_out: list[float] = []
-    downbeat_indices_out: list[int] = []
-    if beat_meta.get("ok") and beat_meta.get("bpm") is not None:
-        detected_bpm = float(beat_meta["bpm"])
-        beat_times_out = list(beat_meta.get("beat_times_sec") or [])
-        downbeat_indices_out = list(beat_meta.get("downbeat_indices") or [])
-        report(20, "beat", f"BPM~{detected_bpm:.1f}, {len(beat_times_out)} beats")
-    else:
-        err = beat_meta.get("error") or "unknown"
-        report(20, "beat", f"박 추정 실패·MIDI 템포 사용 ({err})")
-
-    report(30, "separate", "Demucs로 stem 분리 시작")
+    report(25, "separate", "Demucs로 stem 분리 시작")
     stems = _separate_demucs(mp3_path, job_dir / "stems")
-    guitar_audio = _ensure_flat_guitar_stem_mp3(stems, job_dir / "stems")
+    guitar_mp3 = _ensure_flat_guitar_stem_mp3(stems, job_dir / "stems")
+    guitar_wav = job_dir / "stems" / "guitar.wav"
+    report(35, "convert", "기타 스템 MP3 → WAV(44.1k mono)")
+    _ffmpeg_mp3_to_wav_mono_44k(guitar_mp3, guitar_wav)
 
-    report(45, "onset", "기타 stem onset 추출(음 과다 표기 완화)")
-    onset_meta = analyze_onsets_from_guitar_audio(guitar_audio, bpm_hint=detected_bpm)
+    report(50, "basic-pitch", "Basic Pitch로 기타 WAV → MIDI 변환")
+    midi_path = _guitar_wav_to_midi_basic_pitch(guitar_wav, job_dir / "midi" / "guitar.mid")
+
+    midi_for_bpm = pretty_midi.PrettyMIDI(str(midi_path))
+    midi_bpm = _primary_bpm_from_midi(midi_for_bpm)
+    report(58, "tempo", f"MIDI 템포 BPM≈{midi_bpm:.1f}")
+
+    try:
+        midi_adjust = pretty_midi.PrettyMIDI(str(midi_path))
+        snap_midi_notes_to_sixteenth_grid(midi_adjust, midi_bpm, [])
+        midi_adjust.write(str(midi_path))
+    except Exception as exc:
+        report(62, "quantize", f"MIDI 16분 그리드 스냅 생략/실패: {exc}")
+
+    report(65, "onset", "기타 stem onset 추출(음 과다 표기 완화)")
+    onset_meta = analyze_onsets_from_guitar_audio(guitar_mp3, bpm_hint=midi_bpm)
     onset_times_out: list[float] = []
     if onset_meta.get("ok"):
         onset_times_out = list(onset_meta.get("onset_times_sec") or [])
-        report(50, "onset", f"onset {len(onset_times_out)}개 추출")
+        report(68, "onset", f"onset {len(onset_times_out)}개 추출")
     else:
-        report(50, "onset", f"onset 추출 실패·기본 후처리 사용 ({onset_meta.get('error') or 'unknown'})")
-
-    report(60, "omnizart-guitar", "Omnizart로 기타 MIDI 변환 시작")
-    midi_path = _guitar_stem_to_midi(guitar_audio, job_dir / "midi" / "guitar.mid")
-
-    if detected_bpm is not None:
-        try:
-            midi_adjust = pretty_midi.PrettyMIDI(str(midi_path))
-            snap_midi_notes_to_sixteenth_grid(midi_adjust, detected_bpm, beat_times_out)
-            midi_adjust.write(str(midi_path))
-        except Exception as exc:
-            report(65, "beat", f"MIDI 스냅 실패(템포만 반영): {exc}")
+        report(68, "onset", f"onset 추출 실패·기본 후처리 사용 ({onset_meta.get('error') or 'unknown'})")
 
     capo_guess = capo_from_text
     try:
         midi_for_capo = pretty_midi.PrettyMIDI(str(midi_path))
         raw_capo = _raw_guitar_notes_from_midi(midi_for_capo)
         max_e_capo = max((n["end"] for n in raw_capo), default=0.01)
-        bars_capo = _compute_bars_info(midi_for_capo, max_e_capo, bpm_override=detected_bpm)
+        bars_capo = _compute_bars_info(midi_for_capo, max_e_capo, bpm_override=midi_bpm)
         capo_guess = _refine_capo_with_midi(raw_capo, bars_capo, capo_from_text)
     except Exception as exc:
         report(80, "capo", f"MIDI 기반 카포 보정 실패·텍스트만 사용 ({exc})")
@@ -2127,7 +2149,7 @@ def run_four_step_pipeline(
         lyrics=lyrics,
         audio_duration_sec=audio_dur,
         capo=capo_guess,
-        tempo_override=detected_bpm,
+        tempo_override=midi_bpm,
         onset_times_sec=onset_times_out,
         tab_output_dir=job_dir / "tab",
     )
@@ -2137,7 +2159,7 @@ def run_four_step_pipeline(
         artist=display_artist,
         lyrics=lyrics,
         capo=capo_guess,
-        tempo_override=detected_bpm,
+        tempo_override=midi_bpm,
         onset_times_sec=onset_times_out,
     )
     (job_dir / "tab").mkdir(parents=True, exist_ok=True)
@@ -2155,16 +2177,13 @@ def run_four_step_pipeline(
     (job_dir / "meta.json").write_text(json.dumps(meta_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     job_meta_payload = {
-        "bpm": detected_bpm,
-        "beat_times_sec": beat_times_out if detected_bpm is not None else [],
-        "downbeat_indices": downbeat_indices_out if detected_bpm is not None else [],
-        "beat_analysis_ok": bool(beat_meta.get("ok")),
-        "beat_analysis_raw": {k: v for k, v in beat_meta.items() if k != "error"},
+        "bpm": midi_bpm,
+        "midi_bpm": midi_bpm,
+        "beat_times_sec": [],
+        "downbeat_indices": [],
         "onset_analysis_ok": bool(onset_meta.get("ok")),
         "onset_times_sec": onset_times_out,
     }
-    if beat_meta.get("error"):
-        job_meta_payload["beat_analysis_error"] = beat_meta["error"]
     if onset_meta.get("error"):
         job_meta_payload["onset_analysis_error"] = onset_meta["error"]
     (job_dir / "job_meta.json").write_text(json.dumps(job_meta_payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2194,27 +2213,27 @@ def run_four_step_pipeline(
                 "lyrics_files": lyrics_files_info,
                 "midi_has_named_chord_track_hint": _midi_has_named_chord_track_hint(midi_chk),
                 "midi_note_events_only": True,
-                "chords_on_score": "마디별 음높이로 추정(표기용). Omnizart MIDI에는 코드 문자열이 들어가지 않음.",
+                "chords_on_score": "마디별 음높이로 추정(표기용). Basic Pitch MIDI에는 코드 문자열이 들어가지 않음.",
                 "guitar_stem_mp3": str(job_dir / "stems" / "guitar.mp3"),
+                "guitar_stem_wav": str(job_dir / "stems" / "guitar.wav"),
                 "stems": {k: str(v) for k, v in stems.items()},
                 "midi_path": str(midi_path),
                 "tab_hints_extracted": len(extract_guitar_tab_hints_from_midi(midi_path)),
                 "demucs_model": DEMUCS_MODEL_NAME,
-                "transcription_model": transcription_model.strip(),
-                "guitar_transcribe_backend": (os.environ.get("GUITAR_TRANSCRIBE_BACKEND") or "omnizart").strip(),
+                "guitar_transcribe_backend": "basic_pitch",
                 "alphatex_path": str(job_dir / "tab" / "guitar.alphatex"),
                 "tab_from_tab_midi": str(job_dir / "tab" / "tab_from_tab.mid"),
                 "tab_compare_report": str(job_dir / "tab" / "compare_report.json"),
                 "job_meta_path": str(job_dir / "job_meta.json"),
-                "audio_bpm": detected_bpm,
-                "beat_times_count": len(beat_times_out) if detected_bpm is not None else 0,
+                "midi_bpm": midi_bpm,
+                "beat_times_count": 0,
             },
             ensure_ascii=False,
             indent=2,
         ),
         encoding="utf-8",
     )
-    report(100, "done", "4단계 파이프라인 완료")
+    report(100, "done", "유튜브→Demucs→Basic Pitch→AlphaTex 파이프라인 완료")
 
     return PipelineResult(
         job_dir=job_dir,

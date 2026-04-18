@@ -14,7 +14,7 @@ onnxruntime>=1.17.0
 pretty_midi>=0.2.10
 # Fret-T5: run_backend_py311.ps1 가 scripts/ensure_fret_t5_vendor.ps1 로 vendor 클론 후 pip install -e 처리
 #   (수동: backend/requirements-fret-t5.txt 설명 참고)
-# Omnizart: Python 3.8 전용 venv `backend/.venv_omnizart` + `scripts/ensure_omnizart_venv.ps1` (백엔드 3.11은 서브프로세스로 호출)
+# 유튜브 파이프라인 전사는 Basic Pitch 전용이다. (레거시 Omnizart 스크립트는 backend/scripts 참고)
 # madmom은 Windows + Python 3.11에서 빌드 실패 가능성이 높아 선택 설치로 분리.
 # 가능 환경에서만 수동 설치:
 #   .venv311/Scripts/python.exe -m pip install madmom==0.16.1 --no-build-isolation

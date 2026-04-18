@@ -1,4 +1,6 @@
 # AI Guitar Tab — 문제 정의서 (ML 관점)
+cd "C:\Users\kwakm\OneDrive\Desktop\Cusor-Project\AI-Guitar-Tab-main"
+.\run_backend_py311.ps1
 
 본 문서는 기타 연주 오디오로부터 타브(탭) 후보를 생성하는 파이프라인을 **머신러닝 과제**로 정리한 문제 정의서입니다.
 
@@ -24,11 +26,14 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 이 창은 닫지 말고 유지합니다.
 정상이면 http://127.0.0.1:8000 에 서버가 뜹니다.
 확인: 브라우저에서 http://127.0.0.1:8000/health
+백엔드는 **ffmpeg**가 PATH에 있어야 합니다(기타 스템 MP3→WAV 변환).
 5) (웹 프론트까지 쓸 때) 새 PowerShell 창 하나 더 연다
 첫 번째 창은 백엔드용으로 그대로 둡니다.
 
 6) 두 번째 창에서 프론트 폴더로 이동 후 개발 서버 실행
 cd "C:\Users\kwakm\OneDrive\Desktop\Cusor-Project\AI-Guitar-Tab-main\frontend"
+npm install
+(최초 1회 `npm install` 시 `postinstall`으로 `vendor/alphaTab` 빌드 산출물이 `public/alphatab-assets`에 복사됩니다. alphaTab 재생·ESM 로드에 필요합니다.)
 npm run dev
 이 창도 닫지 말고 유지합니다.
 브라우저: http://localhost:3000
@@ -141,4 +146,12 @@ $env:AI_GUITAR_FRET_T5_HOME = "C:\Users\kwakm\OneDrive\Desktop\Cusor-Project\AI-
 
 ---
 
-*본 README는 코드베이스의 ML 구성(Basic Pitch, Demucs, 오디오 파이프라인)을 반영하여 작성되었으며, 프로젝트에 벤치마크 스크립트가 없다면 §3의 정량 표는 추후 보강 항목으로 두는 것이 맞다.*
+*본 README는 코드베이스의 ML 구성(Basic Pitch, Demucs, 오디오 파이프라인)을 반영하여 작성되었으며, 프로젝트에 벤치마크 스크립트가 없다면 위 섹션 3의 정량 표는 추후 보강 항목으로 두는 것이 맞다.*
+
+### 유튜브 → 타브 파이프라인(요약)
+
+1. `yt-dlp`로 오디오 다운로드  
+2. **Demucs** `htdemucs_6s`(기본): vocals / drums / bass / guitar / piano / other  
+3. 기타 스템을 **44.1kHz 모노 WAV**로 변환 후 **Basic Pitch**로 MIDI 생성  
+4. 악보 템포(BPM)는 **풀믹스 추정이 아니라 생성된 MIDI의 템포 이벤트**에서 읽음  
+5. MIDI + 온셋 힌트로 **AlphaTex** 및 프론트용 `score.json` 생성
