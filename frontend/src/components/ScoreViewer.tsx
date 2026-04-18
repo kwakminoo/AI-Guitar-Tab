@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import type { AlphaTabBeat, AlphaTabNote, AlphaTabScore } from "@/types/alphatabScore";
+import type { AlphaTabBeat, AlphaTabNote, AlphaTabScore, TimedLyricLine } from "@/types/alphatabScore";
 import { createEmptyEditableScore } from "@/lib/emptyAlphatabScore";
 import {
   TEST_SCORE_API_PATH,
@@ -298,6 +298,7 @@ interface ScoreViewerProps {
   songTitle?: string | null;
   songArtist?: string | null;
   songLyrics?: string | null;
+  songTimedLyrics?: TimedLyricLine[] | null;
   songChords?: string[];
   /** 사이드바: 유튜브 URL + 불러오기 */
   youtubeUrl?: string;
@@ -316,6 +317,7 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
   songTitle,
   songArtist,
   songLyrics,
+  songTimedLyrics = null,
   youtubeUrl = "",
   onYoutubeUrlChange,
   onAnalyze,
@@ -370,12 +372,36 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
   const [playedBeatText, setPlayedBeatText] = useState("재생 비트 정보 없음");
   const [renderStageText, setRenderStageText] = useState("렌더 대기");
   const [playerStateText, setPlayerStateText] = useState("정지");
+  const [currentTimeSec, setCurrentTimeSec] = useState(0);
   const [outputDevices, setOutputDevices] = useState<Array<{ id?: string; label?: string }>>([]);
   const [selectedOutputDeviceId, setSelectedOutputDeviceId] = useState("default");
   /** 가사 박스 / 타브 악보 / 테스트 악보 */
   const [scorePanelMode, setScorePanelMode] = useState<"lyrics" | "tab" | "test">("tab");
   const [testAlphaTex, setTestAlphaTex] = useState<string>(FALLBACK_TEST_ALPHATEX);
   const [testScoreLoadError, setTestScoreLoadError] = useState<string | null>(null);
+  const timedLyrics = useMemo<TimedLyricLine[]>(() => {
+    const source = songTimedLyrics && songTimedLyrics.length > 0 ? songTimedLyrics : score?.meta?.timedLyrics ?? [];
+    return source
+      .filter((it) => Number.isFinite(it.startSec) && Number.isFinite(it.endSec) && String(it.text || "").trim().length > 0)
+      .map((it) => ({
+        startSec: Math.max(0, Number(it.startSec)),
+        endSec: Math.max(Number(it.startSec) + 0.1, Number(it.endSec)),
+        text: String(it.text),
+      }))
+      .sort((a, b) => a.startSec - b.startSec);
+  }, [score?.meta?.timedLyrics, songTimedLyrics]);
+  const activeTimedLyric = useMemo(() => {
+    if (timedLyrics.length === 0) return null;
+    const found = timedLyrics.find((line) => currentTimeSec >= line.startSec && currentTimeSec < line.endSec);
+    if (found) return found;
+    return null;
+  }, [currentTimeSec, timedLyrics]);
+  const fallbackPlainLyrics = useMemo(() => {
+    const baseLyrics = (songLyrics?.trim() || (typeof score?.meta?.lyrics === "string" ? score.meta.lyrics.trim() : "")).trim();
+    return baseLyrics;
+  }, [score?.meta?.lyrics, songLyrics]);
+  const hasLyricsPanel = timedLyrics.length > 0 || fallbackPlainLyrics.length > 0;
+
   const selectionStartMsRef = useRef<number | null>(null);
   const selectionStartTickRef = useRef<number | null>(null);
   const previousSecondRef = useRef(-1);
@@ -388,10 +414,10 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
   }, [isStudyMode]);
 
   useEffect(() => {
-    if (!songLyrics?.trim() && scorePanelMode === "lyrics") {
+    if (!hasLyricsPanel && scorePanelMode === "lyrics") {
       setScorePanelMode("tab");
     }
-  }, [scorePanelMode, songLyrics]);
+  }, [hasLyricsPanel, scorePanelMode]);
 
   const scorePanelInitialTab = useRef(true);
   useEffect(() => {
@@ -470,6 +496,7 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
     const lyricsForStaff =
       songLyrics?.trim() ||
       (score?.meta && typeof score.meta.lyrics === "string" ? score.meta.lyrics.trim() : "");
+    const staffLyricsEnabled = lyricsForStaff.length > 0;
     const tex =
       scorePanelMode === "test"
         ? testAlphaTex
@@ -479,7 +506,7 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
               hasBackendAlphaTex
                 ? (alphaTex as string)
                 : buildAlphaTex(normalizedScore as AlphaTabScore),
-              lyricsForStaff || null,
+              staffLyricsEnabled ? (lyricsForStaff || null) : null,
             );
 
     (async () => {
@@ -743,6 +770,7 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
         const denom = Math.max(1, api.endTime ?? e.endTime);
         const progress = Math.max(0, Math.min(100, (e.currentTime / denom) * 100));
         setPlayerProgress(`${Math.floor(progress)}%`);
+        setCurrentTimeSec(Math.max(0, e.currentTime / 1000));
         const tick = Number(api.tickPosition ?? 0);
         if (api.tickCache && Number.isFinite(tick)) {
           const lookup = api.tickCache.findBeat(new Set(api.tracks.map((t) => t.index)), tick);
@@ -895,6 +923,7 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
       });
       api.playerFinished?.on(() => {
         setPlayerStateText("재생 완료");
+        setCurrentTimeSec(0);
         if (!speedTrainerEnabled) return;
         const nextSpeed = Math.min(1.5, (api.playbackSpeed ?? 1) + 0.05);
         api.playbackSpeed = nextSpeed;
@@ -1493,6 +1522,11 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
               Music sheet is loading
             </div>
           </div>
+          {timedLyrics.length > 0 && scorePanelMode !== "lyrics" ? (
+            <div className="pointer-events-none absolute bottom-5 left-1/2 z-10 w-[min(90%,860px)] -translate-x-1/2 rounded-xl bg-black/55 px-4 py-2 text-center text-sm text-white shadow-lg">
+              {activeTimedLyric?.text ?? ""}
+            </div>
+          ) : null}
 
           {(modelError || renderError) && (
             <div className="absolute left-3 top-3 z-30 rounded-md border border-red-200 bg-white px-3 py-2 text-xs text-red-700 shadow-sm">
@@ -1504,7 +1538,7 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
             role="tablist"
             aria-label="악보 보기 전환"
           >
-            {songLyrics?.trim() ? (
+            {hasLyricsPanel ? (
               <button
                 type="button"
                 role="tab"
@@ -1552,7 +1586,7 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
               테스트 악보
             </button>
           </div>
-          {songLyrics?.trim() && scorePanelMode === "lyrics" ? (
+          {hasLyricsPanel && scorePanelMode === "lyrics" ? (
             <section
               id="score-panel-lyrics"
               role="tabpanel"
@@ -1562,14 +1596,30 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
             >
               <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">가사</h2>
               <div className="max-h-[min(70vh,28rem)] overflow-y-auto whitespace-pre-wrap text-sm leading-relaxed">
-                {songLyrics.trim()}
+                {timedLyrics.length > 0 ? (
+                  <div className="space-y-1 whitespace-normal">
+                    {timedLyrics.map((line, idx) => {
+                      const isActive = currentTimeSec >= line.startSec && currentTimeSec < line.endSec;
+                      return (
+                        <p
+                          key={`${line.startSec}-${idx}`}
+                          className={isActive ? "rounded bg-zinc-900 px-2 py-1 text-white" : "px-2 py-1 text-zinc-700"}
+                        >
+                          {line.text}
+                        </p>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  fallbackPlainLyrics
+                )}
               </div>
             </section>
           ) : null}
           <div
             id="score-panel-tab"
-            role={songLyrics?.trim() ? "tabpanel" : undefined}
-            aria-labelledby={songLyrics?.trim() ? "tab-tab" : undefined}
+            role={hasLyricsPanel ? "tabpanel" : undefined}
+            aria-labelledby={hasLyricsPanel ? "tab-tab" : undefined}
             className={
               scorePanelMode === "lyrics"
                 ? "hidden"

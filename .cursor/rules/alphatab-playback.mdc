@@ -1,0 +1,27 @@
+---
+description: alphaTab playback broken while notation renders; prevent regression
+alwaysApply: true
+---
+
+# alphaTab player / MIDI playback (do not regress)
+
+## Symptom
+
+- Notation (SVG) renders but playback never becomes ready; duration shows as zero, Tick 0; no `soundFontLoaded` / `playerReady`.
+
+## Root causes (verified in this project)
+
+1. **Load alphaTab as ESM**: Loading only UMD `alphaTab.js` via a classic script tag means no `import.meta`, so `Environment.webPlatform` stays **Browser (classic)**. The synthesizer needs the **BrowserModule** path that spins up `alphaTab.worker.mjs` as `{ type: 'module' }`. Keep **`loadAlphaTabModule`**: dynamic `import()` of `/alphatab-assets/alphaTab.mjs` with `webpackIgnore` / `@vite-ignore` and full origin URL.
+2. **Do not override `core.scriptFile`**: `Settings` / `CoreSettings` default `scriptFile` from `Environment.scriptFile` (import.meta). Overwriting with `alphaTab.js` or a wrong `.mjs` path breaks worker selection and can leave playback stuck.
+3. **Vendor patch**: In alphaTab 1.9.0, `AlphaSynthWebWorkerApi.loadedMidiInfo` must return **`this._loadedMidiInfo`**, not `this.loadedMidiInfo` (infinite recursion). Keep vendor source + dist aligned.
+4. **Asset route**: Ensure `/alphatab-assets/` serves `alphaTab.mjs`, `alphaTab.core.mjs`, `alphaTab.worker.mjs`, `soundfont/sonivox.sf2`, etc. with 200.
+
+## Do not do
+
+- "Fix playback" by only toggling `core.scriptFile` between `.js` / `.mjs` without the ESM entry load pattern.
+- Register `api.midiLoaded.on(...)` without checking alphaTab version; it can stack-overflow on subscribe (keep ScoreViewer workaround).
+
+## Quick verification
+
+- After load, `api.endTime` / `endTick` should be non-zero when score has length; player should reach ready.
+- Network: `GET /alphatab-assets/alphaTab.mjs`, `alphaTab.worker.mjs`, `soundfont/sonivox.sf2` return 200.

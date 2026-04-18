@@ -20,6 +20,12 @@ export type AlphaTabTrack = {
   beats: AlphaTabBeat[];
 };
 
+export type TimedLyricLine = {
+  startSec: number;
+  endSec: number;
+  text: string;
+};
+
 export type AlphaTabScore = {
   version: number;
   meta: {
@@ -32,6 +38,9 @@ export type AlphaTabScore = {
     key: string;
     capo: number;
     chords?: string[];
+    timedLyrics?: TimedLyricLine[];
+    lyricsAlignmentScore?: number;
+    lyricsTimingSource?: string;
   };
   tracks: AlphaTabTrack[];
 };

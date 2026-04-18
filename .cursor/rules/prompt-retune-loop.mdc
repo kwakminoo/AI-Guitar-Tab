@@ -1,0 +1,48 @@
+---
+description: when user asks for a prompt, enforce iterative retuning on unmet targets
+alwaysApply: true
+---
+
+# Prompt writing rule: mandatory retune loop
+
+## Trigger
+
+- User asks: "프롬프트 작성", "프롬프트 만들어줘", "prompt template", "강한 프롬프트", or equivalent.
+
+## Required behavior
+
+1. Every generated prompt MUST include an explicit **"목표 미달 시 재튜닝 반복"** policy.
+2. The prompt MUST define:
+   - target KPIs/acceptance criteria
+   - max tuning iterations (default 3)
+   - per-iteration parameter adjustment strategy
+   - best-candidate selection rule (score-based)
+   - stop conditions (target met OR iteration limit reached)
+3. The prompt MUST request:
+   - per-iteration metrics table
+   - final chosen configuration and rationale
+   - unresolved gaps and next-step tuning suggestions
+4. Unless user explicitly forbids, default to:
+   - "미달 시 자동 재시도"
+   - "최종 결과는 최고 점수 후보 채택"
+
+## Output preference
+
+- Keep prompt structure deterministic:
+  - Context
+  - Goal
+  - Constraints
+  - Implementation Tasks
+  - Iterative Retune Policy
+  - Validation
+  - Output format
+- When providing the final prompt, output the **entire prompt in one single copyable block** (prefer one fenced code block).
+- Keep any text outside the prompt block minimal (one short line at most).
+- Default phrasing should make it easy to copy as-is, e.g. "아래 전체를 그대로 복사해 사용".
+
+## Do not do
+
+- Do not provide one-shot prompt without retry loop.
+- Do not omit iteration-specific metric logging.
+- Do not split one prompt into multiple blocks.
+- Do not mix analysis/explanations inside the prompt body.

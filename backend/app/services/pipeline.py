@@ -9,16 +9,19 @@ import re
 import subprocess
 import sys
 import math
-import statistics
 import tempfile
 import uuid
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 import pretty_midi
+import numpy as np
 
-from .beat_audio import analyze_beats_from_mix_mp3, analyze_onsets_from_guitar_audio, snap_midi_notes_to_sixteenth_grid
 from .lyrics_lrclib import fetch_lyrics_from_lrclib, parse_artist_and_track_from_youtube_title
 from .tab_playback import refine_note_events_with_reference_midi, write_tab_compare_artifacts
 
@@ -26,11 +29,31 @@ GUITAR_OPEN_MIDI = [64, 59, 55, 50, 45, 40]  # E4, B3, G3, D3, A2, E2
 GUITAR_MIN_PITCH = 40
 GUITAR_MAX_PITCH = 88
 MIN_NOTE_VELOCITY = 18
-ONSET_TOLERANCE_SEC = 0.045
-MERGE_MIN_IOI_SEC = 0.070
-SUSTAIN_RELEASE_SEC = 0.090
-MAX_SUSTAIN_BEATS = 2.0
-MAX_NOTES_PER_SLOT = 3
+ONSET_TOLERANCE_SEC = 0.035
+MERGE_MIN_IOI_SEC = 0.100
+SUSTAIN_RELEASE_SEC = 0.050
+MAX_SUSTAIN_BEATS = 1.5
+MAX_NOTES_PER_SLOT = 2
+CHORD_EXTRA_PENALTY = 0.30
+CHORD_MIN_SCORE_RATIO = 0.10
+CHORD_BASS_PRIOR_SCALE = 0.35
+CHORD_KEY_CONTEXT_BONUS = 0.12
+CHORD_NGRAM_ROOT_JUMP_PENALTY = 0.22
+CHORD_NGRAM_QUALITY_SWITCH_PENALTY = 0.16
+CHORD_SHORT_NOTE_RATIO = 0.20
+CHORD_SHORT_NOTE_WEIGHT = 0.40
+MIDI_CLEANUP_ENABLED = True
+MIDI_CLEANUP_MIN_DURATION_SEC = 0.08
+MIDI_CLEANUP_DUPLICATE_START_TOLERANCE_SEC = 0.07
+MIDI_CLEANUP_VELOCITY_FLOOR = 20
+MIDI_CLEANUP_VELOCITY_RELATIVE_RATIO = 0.40
+MIDI_SNAP_ENABLED = False
+MIDI_SNAP_MAX_ERROR_SEC = 0.03
+MIDI_SNAP_NOTE_END = False
+DURATION_32_RATIO_TARGET_PCT = 35.0
+BAR_32_RATIO_LIMIT_PCT = 35.0
+BAR_ATTACK_MAX_COUNT = 10
+CHORD_FIRST_SIMPLIFY = False
 
 # General MIDI program → alphaTab instrument 이름 (Structural Metadata 문서와 동일 계열)
 _GM_PROGRAM_TO_ALPHATAB: dict[int, str] = {
@@ -191,6 +214,303 @@ def _alphatex_lyrics_truncation_info(raw: str) -> tuple[bool, int]:
     return truncated, min(len(c), LYRICS_ALPHA_TEX_MAX_CHARS)
 
 
+# AlphaTex // 단일 줄 주석(렉서가 무시). 마디 줄 직전에 삽입.
+INTERLEAVED_LYRIC_MIN_GAP_SEC = 0.55
+INTERLEAVED_LYRIC_MAX_LINES_PER_BAR = 2
+
+
+def _sanitize_alphatex_single_line_comment(text: str) -> str:
+    """AlphaTex // 주석 본문(한 줄). 줄바꿈·제어 문자 제거, /* */ 시퀀스는 깨짐 방지용으로 완화."""
+    s = (text or "").replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    s = re.sub(r"[ \t]+", " ", s).strip()
+    s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", s)
+    s = s.replace("/*", " / ").replace("*/", " / ")
+    return s
+
+
+def _remove_lyrics_metadata_line(tex: str) -> str:
+    """헤더의 \\lyrics 메타 제거(인터리브 모드에서 이중 표기 방지)."""
+    out: list[str] = []
+    for line in tex.split("\n"):
+        if re.match(r'^\s*\\lyrics(?:\s+\d+)?\s+"(?:\\.|[^"\\])*"\s*$', line):
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def _build_staff_lyrics_commands(
+    aligned_timed_lyrics: list[dict[str, Any]],
+    bars_info: list[tuple[float, float, int, int, float, int]],
+    *,
+    max_lines: int = 48,
+) -> list[str]:
+    """timed 가사를 시작 마디 기반 \\lyrics N \"...\" 라인들로 변환한다."""
+    if not aligned_timed_lyrics or not bars_info:
+        return []
+    grouped: dict[int, list[str]] = defaultdict(list)
+    for it in aligned_timed_lyrics:
+        raw = str(it.get("line") or it.get("text", "")).strip()
+        if not raw:
+            continue
+        try:
+            t0 = float(it.get("start_sec", 0.0))
+        except (TypeError, ValueError):
+            t0 = 0.0
+        bi = _bar_index_for_time_sec(t0, bars_info)
+        bi = min(max(0, bi), len(bars_info) - 1)
+        txt = _sanitize_alphatex_single_line_comment(raw)
+        if txt:
+            grouped[bi].append(txt)
+
+    if not grouped:
+        return []
+
+    out: list[str] = []
+    for bi in sorted(grouped.keys()):
+        merged = " ".join(grouped[bi]).strip()
+        if not merged:
+            continue
+        # alphaTex startBar는 1-indexed.
+        start_bar = int(bi) + 1
+        out.append(f'\\lyrics {start_bar} "{_escape_alpha_tex_lyrics(merged)}"')
+        if len(out) >= max(1, int(max_lines)):
+            break
+    return out
+
+
+def _inject_lyrics_after_staff_line(head: str, lyric_commands: list[str]) -> str:
+    """\\staff 줄 직후에 \\lyrics 라인 블록을 넣어 alphaTab 뷰어에 가사가 그려지게 한다."""
+    cmds = [c for c in lyric_commands if str(c).strip()]
+    if not cmds:
+        return head
+    if re.search(r"(?m)^\s*\\lyrics(?:\s+\d+)?\s+\"", head):
+        return head
+    lines = head.split("\n")
+    out: list[str] = []
+    inserted = False
+    for ln in lines:
+        out.append(ln)
+        if not inserted and re.match(r"^\s*\\staff\s+", ln.strip()):
+            out.extend(cmds)
+            inserted = True
+    if not inserted:
+        return "\n".join(cmds) + "\n" + head
+    return "\n".join(out)
+
+
+def _split_alphatex_at_first_sync(tex: str) -> tuple[str, str] | None:
+    m = re.search(r"(?m)^\\sync\s+\d+\s+", tex)
+    if not m:
+        return None
+    return tex[: m.start()], tex[m.start() :]
+
+
+def _bar_index_for_time_sec(
+    t: float,
+    bars_info: list[tuple[float, float, int, int, float, int]],
+) -> int:
+    eps = 1e-6
+    t = max(0.0, float(t))
+    if not bars_info:
+        return 0
+    for i, row in enumerate(bars_info):
+        bs, be = float(row[0]), float(row[1])
+        if bs - eps <= t < be - eps:
+            return i
+    starts = [float(row[0]) for row in bars_info]
+    return min(range(len(starts)), key=lambda j: abs(starts[j] - t))
+
+
+def _first_bar_line_index(lines: list[str]) -> int | None:
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.endswith("|"):
+            return i
+    return None
+
+
+def _build_interleaved_comment_lines_per_bar(
+    aligned_timed_lyrics: list[dict[str, Any]],
+    bars_info: list[tuple[float, float, int, int, float, int]],
+    bar_line_count: int,
+    *,
+    max_chars_total: int,
+) -> list[list[str]]:
+    """각 마디(출력 줄)당 0~2줄의 주석 본문(// 접두 없음)."""
+    if bar_line_count < 1:
+        return []
+    items: list[tuple[float, str]] = []
+    for it in aligned_timed_lyrics:
+        raw = str(it.get("line") or it.get("text", "")).strip()
+        if not raw:
+            continue
+        st = _sanitize_alphatex_single_line_comment(raw)
+        if not st:
+            continue
+        try:
+            t0 = float(it.get("start_sec", 0.0))
+        except (TypeError, ValueError):
+            t0 = 0.0
+        items.append((t0, st))
+    items.sort(key=lambda x: x[0])
+
+    by_bar: dict[int, list[tuple[float, str]]] = defaultdict(list)
+    last_bi = bar_line_count - 1
+    for t0, st in items:
+        bi = _bar_index_for_time_sec(t0, bars_info)
+        bi = min(max(bi, 0), last_bi)
+        by_bar[bi].append((t0, st))
+
+    per_bar: list[list[str]] = [[] for _ in range(bar_line_count)]
+
+    for bi in sorted(by_bar.keys()):
+        seq = sorted(by_bar[bi], key=lambda x: x[0])
+        if not seq:
+            continue
+        if len(seq) == 1:
+            per_bar[bi] = [seq[0][1]]
+            continue
+        t0, s0 = seq[0]
+        t1, s1 = seq[1]
+        if len(seq) == 2 and (t1 - t0) >= INTERLEAVED_LYRIC_MIN_GAP_SEC:
+            per_bar[bi] = [s0, s1][:INTERLEAVED_LYRIC_MAX_LINES_PER_BAR]
+        elif len(seq) == 2:
+            per_bar[bi] = [f"{s0} · {s1}"]
+        else:
+            merged = " · ".join(x[1] for x in seq)
+            per_bar[bi] = [merged][:INTERLEAVED_LYRIC_MAX_LINES_PER_BAR]
+
+    # 문자 예산: 마디 순서대로 줄 단위로 채우다가 초과 시 마지막 줄만 잘라냄
+    out: list[list[str]] = [[] for _ in range(bar_line_count)]
+    used = 0
+    for bi in range(bar_line_count):
+        for line in per_bar[bi]:
+            if used >= max_chars_total:
+                break
+            room = max_chars_total - used
+            if len(line) <= room:
+                out[bi].append(line)
+                used += len(line)
+            else:
+                if room > 0:
+                    out[bi].append(line[:room])
+                    used = max_chars_total
+                break
+        if used >= max_chars_total:
+            break
+    return out
+
+
+def _apply_interleaved_lyrics_to_alphatex(
+    tex: str,
+    midi_path: Path,
+    bpm_override: float | None,
+    aligned_timed_lyrics: list[dict[str, Any]],
+    plain_lyrics_for_staff: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """
+    timed 가사를 // 주석으로 마디 줄 직전에 삽입한다.
+    기존 헤더 \\lyrics 는 한 번 제거한 뒤, plain_lyrics_for_staff 가 있으면 \\staff 직후에 다시 넣어
+    alphaTab 악보에 가사(음절·박 매핑)가 그려지게 한다.
+    실패 시 원본 tex 반환.
+    """
+    meta: dict[str, Any] = {
+        "applied": False,
+        "layout": "header_lyrics",
+        "error": None,
+        "skipped_reason": None,
+        "validator_ok_after": None,
+        "bar_line_count": 0,
+        "interleaved_char_count": 0,
+        "staff_lyrics_reinjected": False,
+    }
+    if not aligned_timed_lyrics or not any(
+        str(it.get("line") or it.get("text", "")).strip() for it in aligned_timed_lyrics
+    ):
+        meta["layout"] = "none"
+        meta["skipped_reason"] = "no_timed_text"
+        return tex, meta
+
+    split = _split_alphatex_at_first_sync(tex)
+    if split is None:
+        meta["skipped_reason"] = "no_sync_block"
+        return tex, meta
+
+    head, sync_part = split
+    head_lines = head.split("\n")
+    first_bar_i = _first_bar_line_index(head_lines)
+    if first_bar_i is None:
+        meta["skipped_reason"] = "no_bar_lines"
+        return tex, meta
+
+    prefix_lines = head_lines[:first_bar_i]
+    bar_lines = head_lines[first_bar_i:]
+    bar_line_count = len(bar_lines)
+    if bar_line_count < 1:
+        meta["skipped_reason"] = "empty_bars"
+        return tex, meta
+
+    try:
+        midi = pretty_midi.PrettyMIDI(str(midi_path))
+        raw_notes = _raw_guitar_notes_from_midi(midi)
+        max_end = max((n["end"] for n in raw_notes), default=0.0)
+        max_end = max(float(max_end), 0.01)
+        bars_info = _compute_bars_info(midi, max_end, bpm_override=bpm_override)
+    except Exception as exc:
+        meta["skipped_reason"] = f"bars_info:{exc}"
+        return tex, meta
+
+    if len(bars_info) < 1:
+        meta["skipped_reason"] = "empty_bars_info"
+        return tex, meta
+
+    per_bar_comments = _build_interleaved_comment_lines_per_bar(
+        aligned_timed_lyrics,
+        bars_info,
+        bar_line_count,
+        max_chars_total=LYRICS_ALPHA_TEX_MAX_CHARS,
+    )
+    interleaved_chars = sum(len(s) for row in per_bar_comments for s in row)
+    meta["interleaved_char_count"] = int(interleaved_chars)
+    if interleaved_chars < 1:
+        meta["skipped_reason"] = "no_comment_after_map"
+        return tex, meta
+
+    new_bar_parts: list[str] = []
+    for j, bl in enumerate(bar_lines):
+        cmt_lines = per_bar_comments[j] if j < len(per_bar_comments) else []
+        if cmt_lines:
+            cmt_block = "\n".join(f"// {c}" for c in cmt_lines)
+            new_bar_parts.append(f"{cmt_block}\n{bl}")
+        else:
+            new_bar_parts.append(bl)
+
+    head_no_lyrics = _remove_lyrics_metadata_line("\n".join(prefix_lines))
+    lyric_commands = _build_staff_lyrics_commands(aligned_timed_lyrics, bars_info)
+    if not lyric_commands and plain_lyrics_for_staff and str(plain_lyrics_for_staff).strip():
+        lyric_commands = [f'\\lyrics "{_escape_alpha_tex_lyrics(str(plain_lyrics_for_staff).strip())}"']
+    if lyric_commands:
+        head_no_lyrics = _inject_lyrics_after_staff_line(head_no_lyrics, lyric_commands)
+        meta["staff_lyrics_reinjected"] = True
+    new_head = head_no_lyrics.rstrip() + "\n" + "\n".join(new_bar_parts)
+    new_tex = new_head + sync_part
+
+    diag = _validate_alphatex_with_alphatab(new_tex)
+    token_ok = bool(diag.get("tokenGuard", {}).get("ok", True))
+    has_errors = bool(diag.get("hasErrors", False))
+    meta["validator_ok_after"] = bool(token_ok and not has_errors)
+    if not token_ok or has_errors:
+        meta["error"] = "validator_failed_after_interleave"
+        meta["fallback"] = "kept_original_with_header_lyrics"
+        meta["staff_lyrics_reinjected"] = False
+        return tex, meta
+
+    meta["applied"] = True
+    meta["layout"] = "interleaved_comment"
+    meta["bar_line_count"] = int(bar_line_count)
+    return new_tex, meta
+
+
 def _write_lyrics_files(
     job_dir: Path,
     lyrics: str | None,
@@ -198,6 +518,8 @@ def _write_lyrics_files(
     *,
     alphatex_truncated: bool,
     alphatex_lyrics_chars: int,
+    lyrics_layout: str | None = None,
+    alphatex_note_override: str | None = None,
 ) -> dict[str, Any]:
     """
     가사를 작업 폴더에 별도 파일로 저장한다.
@@ -222,6 +544,19 @@ def _write_lyrics_files(
 
     root_txt.write_text(text, encoding="utf-8")
     tab_txt.write_text(text, encoding="utf-8")
+    default_note = (
+        "guitar.alphatex 헤더의 \\\\lyrics 에 동일 가사가 들어가며, "
+        "alphaTab이 박마다 음절을 배치한다. "
+        "문법: https://alphatab.net/docs/alphatex/metadata/staff/lyrics"
+    )
+    interleaved_note = (
+        "guitar.alphatex: 각 마디 위 // 주석(편집 참고)과 함께 "
+        "헤더 \\\\staff 직후 \\\\lyrics <startBar> \"...\" 가 들어가면 alphaTab 뷰어에 가사가 시작 마디 기준으로 그려진다. "
+        "// 줄은 렌더에 보이지 않을 수 있다."
+    )
+    note = alphatex_note_override or (
+        interleaved_note if lyrics_layout == "interleaved_comment" else default_note
+    )
     tab_meta.write_text(
         json.dumps(
             {
@@ -230,15 +565,12 @@ def _write_lyrics_files(
                 "encoding": "utf-8",
                 "alphatex_lyrics_chars": alphatex_lyrics_chars,
                 "alphatex_lyrics_truncated": alphatex_truncated,
+                "lyrics_layout": lyrics_layout,
                 "files": {
                     "plain_root": str(root_txt.as_posix()),
                     "plain_next_to_alphatex": str(tab_txt.as_posix()),
                 },
-                "alphatex_note": (
-                    "guitar.alphatex 헤더의 \\\\lyrics 에 동일 가사가 들어가며, "
-                    "alphaTab이 박마다 음절을 배치한다. "
-                    "문법: https://alphatab.net/docs/alphatex/metadata/staff/lyrics"
-                ),
+                "alphatex_note": note,
             },
             ensure_ascii=False,
             indent=2,
@@ -305,6 +637,312 @@ def _vtt_to_plain_lyrics(vtt_text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _parse_timecode_to_sec(value: str) -> float | None:
+    s = (value or "").strip().replace(",", ".")
+    if not s:
+        return None
+    parts = s.split(":")
+    try:
+        if len(parts) == 3:
+            h = int(parts[0])
+            m = int(parts[1])
+            sec = float(parts[2])
+            return float(h * 3600 + m * 60 + sec)
+        if len(parts) == 2:
+            m = int(parts[0])
+            sec = float(parts[1])
+            return float(m * 60 + sec)
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _parse_vtt_timed_lyrics(vtt_text: str, source: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    lines = (vtt_text or "").replace("\r\n", "\n").split("\n")
+    i = 0
+    prev_text = ""
+    while i < len(lines):
+        s = lines[i].strip()
+        i += 1
+        if not s or s.upper().startswith("WEBVTT") or s.startswith("NOTE"):
+            continue
+        if "-->" not in s:
+            continue
+        parts = s.split("-->")
+        if len(parts) != 2:
+            continue
+        st = _parse_timecode_to_sec(parts[0].strip())
+        en = _parse_timecode_to_sec(parts[1].strip().split(" ")[0])
+        if st is None:
+            continue
+        payload: list[str] = []
+        while i < len(lines):
+            t = lines[i].strip()
+            if not t:
+                i += 1
+                break
+            if "-->" in t:
+                break
+            t = re.sub(r"<[^>]+>", "", t).strip()
+            if t and not re.match(r"^(kind|language)\s*:", t, flags=re.I):
+                payload.append(t)
+            i += 1
+        text = " ".join(payload).strip()
+        if not text or text == prev_text:
+            continue
+        out.append(
+            {
+                "line": text,
+                "start_sec": round(float(st), 3),
+                "end_sec": round(float(en if en is not None else st + 2.0), 3),
+                "source": source,
+            }
+        )
+        prev_text = text
+    return out
+
+
+def _parse_lrc_timed_lyrics(lrc_text: str, source: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    prev_text = ""
+    for raw in (lrc_text or "").replace("\r\n", "\n").split("\n"):
+        line = raw.strip()
+        if not line:
+            continue
+        tags = re.findall(r"\[(\d{1,2}:\d{1,2}(?:[.:]\d{1,3})?)\]", line)
+        if not tags:
+            continue
+        text = re.sub(r"\[[^\]]+\]", "", line).strip()
+        if not text or text == prev_text:
+            continue
+        for tg in tags:
+            st = _parse_timecode_to_sec(tg)
+            if st is None:
+                continue
+            out.append(
+                {
+                    "line": text,
+                    "start_sec": round(float(st), 3),
+                    "end_sec": None,
+                    "source": source,
+                }
+            )
+        prev_text = text
+    out = sorted(out, key=lambda x: float(x.get("start_sec", 0.0)))
+    for idx in range(len(out)):
+        st = float(out[idx]["start_sec"])
+        nxt = float(out[idx + 1]["start_sec"]) if idx + 1 < len(out) else st + 2.0
+        out[idx]["end_sec"] = round(max(st + 0.1, nxt), 3)
+    return out
+
+
+def _timed_lyrics_to_plain(timed: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    prev = ""
+    for item in timed:
+        text = str(item.get("line", "")).strip()
+        if not text or text == prev:
+            continue
+        lines.append(text)
+        prev = text
+    return "\n".join(lines).strip()
+
+
+def _lyrics_char_ratio(text: str) -> float:
+    s = (text or "").strip()
+    if not s:
+        return 0.0
+    allowed = re.findall(r"[A-Za-z0-9가-힣ぁ-んァ-ヶ一-龯]", s)
+    return float(len(allowed)) / float(max(1, len(s)))
+
+
+def _is_noise_lyric_line(text: str) -> bool:
+    s = (text or "").strip()
+    if not s:
+        return True
+    lowered = s.lower()
+    if re.search(r"(번역|자막|subtitle|captions|credit|trans by|\bsub\b)", lowered, flags=re.I):
+        return True
+    if len(s) <= 2:
+        return True
+    if _lyrics_char_ratio(s) < 0.35:
+        return True
+    return False
+
+
+def _filter_timed_lyrics_noise(
+    timed: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    kept: list[dict[str, Any]] = []
+    removed = 0
+    prev = ""
+    for item in timed:
+        text = str(item.get("line", "")).strip()
+        if not text or _is_noise_lyric_line(text):
+            removed += 1
+            continue
+        if text == prev:
+            removed += 1
+            continue
+        kept.append(item)
+        prev = text
+    return kept, {
+        "before_line_count": int(len(timed)),
+        "after_line_count": int(len(kept)),
+        "removed_line_count": int(removed),
+    }
+
+
+def _read_url_json(url: str, *, timeout: float = 10.0) -> Any:
+    req = urllib.request.Request(url, headers={"User-Agent": "ai-guitar-tab/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as res:
+        return json.loads(res.read().decode("utf-8", errors="replace"))
+
+
+def _fetch_lrclib_timed_lyrics(
+    title: str,
+    artist: str | None,
+    uploader: str | None,
+    duration_sec: float | None,
+) -> tuple[list[dict[str, Any]], str]:
+    parsed_artist, parsed_track = parse_artist_and_track_from_youtube_title(title)
+    artist_q = (artist or parsed_artist or uploader or "").strip()
+    track_q = (parsed_track or title or "").strip()
+    if not artist_q or not track_q:
+        return [], "none"
+    params = urllib.parse.urlencode({"track_name": track_q, "artist_name": artist_q})
+    try:
+        data = _read_url_json(f"https://lrclib.net/api/search?{params}")
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        return [], "none"
+    if not isinstance(data, list):
+        return [], "none"
+    best: dict[str, Any] | None = None
+    best_score = -1e9
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        synced = str(item.get("syncedLyrics") or "").strip()
+        if not synced:
+            continue
+        score = 0.0
+        dur = item.get("duration")
+        if duration_sec is not None and dur is not None:
+            try:
+                score -= abs(float(duration_sec) - float(dur))
+            except (TypeError, ValueError):
+                pass
+        if score > best_score:
+            best_score = score
+            best = item
+    if best is None:
+        return [], "none"
+    timed = _parse_lrc_timed_lyrics(str(best.get("syncedLyrics") or ""), "lrclib_synced")
+    return timed, ("lrclib_synced" if timed else "none")
+
+
+def _align_timed_lyrics_to_timeline(
+    timed: list[dict[str, Any]],
+    beat_anchors_sec: list[float],
+    *,
+    use_piecewise: bool = True,
+) -> tuple[list[dict[str, Any]], float, float, str, list[dict[str, Any]]]:
+    if not timed:
+        return [], 0.0, 0.0, "global", []
+    anchors = sorted(set(float(t) for t in beat_anchors_sec if float(t) >= 0.0))
+    if not anchors:
+        return timed, 0.0, 0.0, "global", []
+
+    def nearest_gap(anchor_list: list[float], v: float) -> float:
+        pos = bisect.bisect_left(anchor_list, v)
+        cands: list[float] = []
+        if pos < len(anchor_list):
+            cands.append(abs(anchor_list[pos] - v))
+        if pos > 0:
+            cands.append(abs(anchor_list[pos - 1] - v))
+        return min(cands) if cands else 999.0
+
+    def score_for_offset(items: list[dict[str, Any]], off: float) -> float:
+        if not items:
+            return -1e9
+        gaps = [nearest_gap(anchors, float(it.get("start_sec", 0.0)) + off) for it in items]
+        close = sum(1 for g in gaps if g <= 0.12)
+        return close - (sum(gaps) / max(1, len(gaps)))
+
+    def find_best_offset(items: list[dict[str, Any]]) -> tuple[float, float]:
+        best_offset_local = 0.0
+        best_score_local = -1e9
+        for k in range(-30, 31):
+            off = k * 0.05
+            score = score_for_offset(items, off)
+            if score > best_score_local:
+                best_score_local = score
+                best_offset_local = off
+        return best_offset_local, best_score_local
+
+    best_offset, best_score = find_best_offset(timed)
+
+    aligned: list[dict[str, Any]] = []
+    closeness: list[float] = []
+    mode = "global"
+    segments: list[dict[str, Any]] = []
+
+    def apply_items(items: list[dict[str, Any]], off: float, seg_start: float, seg_end: float, seg_score: float) -> None:
+        for item in items:
+            st = max(0.0, float(item.get("start_sec", 0.0)) + off)
+            en = max(st + 0.1, float(item.get("end_sec", st + 1.5)) + off)
+            gap = nearest_gap(anchors, st)
+            closeness.append(max(0.0, 1.0 - min(1.0, gap / 0.25)))
+            mapped = dict(item)
+            mapped["start_sec"] = round(st, 3)
+            mapped["end_sec"] = round(en, 3)
+            mapped["anchor_gap_sec"] = round(gap, 3)
+            aligned.append(mapped)
+        segments.append(
+            {
+                "start_sec": round(seg_start, 3),
+                "end_sec": round(seg_end, 3),
+                "offset_sec": round(off, 3),
+                "score": round(seg_score, 4),
+            }
+        )
+
+    if use_piecewise and len(timed) >= 8:
+        mode = "piecewise"
+        timed_sorted = sorted(timed, key=lambda x: float(x.get("start_sec", 0.0)))
+        idx = 0
+        while idx < len(timed_sorted):
+            seg_start = float(timed_sorted[idx].get("start_sec", 0.0))
+            target_lines = 5
+            if idx > 0:
+                prev_gap = seg_start - float(timed_sorted[idx - 1].get("start_sec", seg_start))
+                if prev_gap > 3.0:
+                    target_lines = 4
+                elif prev_gap < 1.2:
+                    target_lines = 6
+            target_lines = max(4, min(6, target_lines))
+            seg_items: list[dict[str, Any]] = []
+            j = idx
+            while j < len(timed_sorted) and len(seg_items) < target_lines:
+                seg_items.append(timed_sorted[j])
+                j += 1
+            if not seg_items:
+                idx = j + 1
+                continue
+            seg_end = float(seg_items[-1].get("end_sec", seg_items[-1].get("start_sec", seg_start) + 2.0))
+            seg_offset, seg_score = find_best_offset(seg_items)
+            apply_items(seg_items, seg_offset, seg_start, seg_end, seg_score)
+            idx = j
+    else:
+        apply_items(timed, best_offset, 0.0, max((float(x.get("end_sec", 0.0)) for x in timed), default=0.0), best_score)
+
+    aligned.sort(key=lambda x: float(x.get("start_sec", 0.0)))
+    weighted_offset = float(round(sum(float(s["offset_sec"]) for s in segments) / max(1, len(segments)), 3))
+    score = float(round((sum(closeness) / max(1, len(closeness))), 4))
+    return aligned, weighted_offset, score, mode, segments
+
+
 def _youtube_subtitle_fallback_lyrics(url: str, out_dir: Path) -> str | None:
     """
     yt-dlp 자막(ko-orig/ko)에서 가사 추출.
@@ -344,7 +982,9 @@ def _youtube_subtitle_fallback_lyrics(url: str, out_dir: Path) -> str | None:
     )
     for p in candidates:
         try:
-            text = _vtt_to_plain_lyrics(p.read_text(encoding="utf-8", errors="replace"))
+            raw = p.read_text(encoding="utf-8", errors="replace")
+            timed = _parse_vtt_timed_lyrics(raw, "youtube_subtitles")
+            text = _timed_lyrics_to_plain(timed) or _vtt_to_plain_lyrics(raw)
         except Exception:
             continue
         if not text:
@@ -366,16 +1006,19 @@ def _resolve_youtube_lyrics(
     duration_youtube: float | None,
     duration_audio: float | None,
     cache_dir: Path,
-) -> tuple[str | None, str]:
+) -> tuple[str | None, str, list[dict[str, Any]], str]:
     """
     LRCLIB 우선 → (옵션) ffprobe 길이로 재시도 → 유튜브 설명 폴백.
-    반환: (가사 텍스트, 출처 lrclib|lrclib_cache|youtube_description|none)
+    반환: (가사 텍스트, 출처, timed_lyrics, timed_source)
     """
     text, src = fetch_lyrics_from_lrclib(
         title, artist, uploader, duration_youtube, cache_dir=cache_dir
     )
+    timed_lrclib, timed_lrclib_src = _fetch_lrclib_timed_lyrics(
+        title, artist, uploader, duration_youtube if duration_youtube is not None else duration_audio
+    )
     if text and text.strip():
-        return text.strip(), src
+        return text.strip(), src, timed_lrclib, timed_lrclib_src
 
     if duration_audio is not None:
         if duration_youtube is None or abs(float(duration_audio) - float(duration_youtube or 0)) > 1.0:
@@ -383,16 +1026,27 @@ def _resolve_youtube_lyrics(
                 title, artist, uploader, duration_audio, cache_dir=cache_dir
             )
             if text2 and text2.strip():
-                return text2.strip(), src2
+                return text2.strip(), src2, timed_lrclib, timed_lrclib_src
 
-    yt_sub = _youtube_subtitle_fallback_lyrics(url, job_dir / "lyrics_subs")
+    subs_dir = job_dir / "lyrics_subs"
+    yt_sub = _youtube_subtitle_fallback_lyrics(url, subs_dir)
     if yt_sub and yt_sub.strip():
-        return yt_sub.strip(), "youtube_subtitles"
+        timed_candidates = sorted(subs_dir.glob("*.ko-orig.vtt"), reverse=True) + sorted(
+            subs_dir.glob("*.ko.vtt"), reverse=True
+        )
+        for p in timed_candidates:
+            try:
+                timed_sub = _parse_vtt_timed_lyrics(p.read_text(encoding="utf-8", errors="replace"), "youtube_subtitles")
+            except Exception:
+                continue
+            if timed_sub:
+                return yt_sub.strip(), "youtube_subtitles", timed_sub, "youtube_subtitles"
+        return yt_sub.strip(), "youtube_subtitles", timed_lrclib, timed_lrclib_src
 
     fb = _description_fallback_lyrics(description)
     if fb:
-        return fb, "youtube_description"
-    return None, "none"
+        return fb, "youtube_description", timed_lrclib, timed_lrclib_src
+    return None, "none", timed_lrclib, timed_lrclib_src
 
 
 def _merge_chord_into_beat_token(token: str, ch_label: str) -> str:
@@ -503,12 +1157,12 @@ def _best_chord_from_weights(weights: list[float], capo: int) -> str | None:
             template = {(root + i) % 12 for i in intervals}
             score = sum(w[p] for p in template)
             extra = sum(w[p] for p in range(12) if p not in template)
-            adj = score - 0.22 * extra
+            adj = score - CHORD_EXTRA_PENALTY * extra
             if adj > best_score + 1e-9:
                 best_score = adj
                 shape_root = (root - int(capo)) % 12
                 best_label = f"{_pc_to_name(shape_root)}{suffix}"
-    if best_label is None or best_score < total * 0.06:
+    if best_label is None or best_score < total * CHORD_MIN_SCORE_RATIO:
         return None
     return best_label
 
@@ -527,20 +1181,177 @@ def _chord_for_time_range(
     return _best_chord_from_weights(weights, capo)
 
 
+def _parse_chord_label(label: str) -> tuple[int, str]:
+    m = re.match(r"^([A-G](?:#|b)?)(.*)$", (label or "").strip())
+    if not m:
+        return 0, ""
+    root_text = m.group(1)
+    suffix = m.group(2) or ""
+    pc_map = {
+        "C": 0,
+        "C#": 1,
+        "Db": 1,
+        "D": 2,
+        "D#": 3,
+        "Eb": 3,
+        "E": 4,
+        "F": 5,
+        "F#": 6,
+        "Gb": 6,
+        "G": 7,
+        "G#": 8,
+        "Ab": 8,
+        "A": 9,
+        "A#": 10,
+        "Bb": 10,
+        "B": 11,
+    }
+    return pc_map.get(root_text, 0), suffix
+
+
+def _quality_bucket_from_suffix(suffix: str) -> str:
+    s = (suffix or "").lower()
+    if "sus" in s:
+        return "sus"
+    if "dim" in s or "m7b5" in s:
+        return "dim"
+    if "maj7" in s:
+        return "maj7"
+    if s.startswith("m"):
+        return "minor"
+    return "major"
+
+
+def _is_chord_diatonic_in_c_major(root_pc: int, suffix: str) -> bool:
+    bucket = _quality_bucket_from_suffix(suffix)
+    allowed: dict[int, set[str]] = {
+        0: {"major", "maj7"},
+        2: {"minor"},
+        4: {"minor"},
+        5: {"major", "maj7", "sus"},
+        7: {"major"},
+        9: {"minor"},
+        11: {"dim"},
+    }
+    return bucket in allowed.get(root_pc % 12, set())
+
+
+def _chord_candidate_scores_for_time_range(
+    raw_notes: list[dict[str, Any]],
+    t0: float,
+    t1: float,
+    capo: int,
+) -> dict[str, float]:
+    measure_len = max(1e-6, t1 - t0)
+    weights = [0.0] * 12
+    bass_prior = [0.0] * 12
+    for n in raw_notes:
+        ov = min(n["end"], t1) - max(n["start"], t0)
+        if ov <= 0:
+            continue
+        vel = float(n.get("velocity", 64))
+        vel_factor = max(0.25, min(1.2, vel / 96.0))
+        dur_ratio = ov / measure_len
+        dur_factor = CHORD_SHORT_NOTE_WEIGHT if dur_ratio < CHORD_SHORT_NOTE_RATIO else 1.0
+        w = ov * vel_factor * dur_factor
+        pc = int(n["pitch"]) % 12
+        weights[pc] += w
+        # 저음 우선 루트 prior (낮을수록 가중)
+        low_boost = max(0.0, (72.0 - float(n["pitch"])) / 32.0)
+        bass_prior[pc] += ov * low_boost
+
+    total = sum(weights)
+    if total < 1e-6:
+        return {}
+
+    candidate_scores: dict[str, float] = {}
+    bass_norm = sum(bass_prior) or 1.0
+    for root in range(12):
+        for suffix, intervals in _CHORD_CANDIDATES:
+            template = {(root + i) % 12 for i in intervals}
+            score = sum(weights[p] for p in template)
+            extra = sum(weights[p] for p in range(12) if p not in template)
+            adj = score - CHORD_EXTRA_PENALTY * extra
+            adj += CHORD_BASS_PRIOR_SCALE * total * (bass_prior[root] / bass_norm)
+            if _is_chord_diatonic_in_c_major(root, suffix):
+                adj += CHORD_KEY_CONTEXT_BONUS * total
+            if adj < total * CHORD_MIN_SCORE_RATIO:
+                continue
+            shape_root = (root - int(capo)) % 12
+            label = f"{_pc_to_name(shape_root)}{suffix}"
+            candidate_scores[label] = max(candidate_scores.get(label, -1e9), float(adj))
+    return candidate_scores
+
+
+def _transition_penalty(prev_label: str, cur_label: str) -> float:
+    prev_root, prev_suffix = _parse_chord_label(prev_label)
+    cur_root, cur_suffix = _parse_chord_label(cur_label)
+    root_jump = min((cur_root - prev_root) % 12, (prev_root - cur_root) % 12)
+    penalty = CHORD_NGRAM_ROOT_JUMP_PENALTY * max(0, root_jump - 4)
+    if _quality_bucket_from_suffix(prev_suffix) != _quality_bucket_from_suffix(cur_suffix):
+        penalty += CHORD_NGRAM_QUALITY_SWITCH_PENALTY
+    return float(penalty)
+
+
 def _bar_chord_labels(
     raw_notes: list[dict[str, Any]],
     bars_info: list[tuple[float, float, int, int, float, int]],
     capo: int,
 ) -> list[str]:
-    out: list[str] = []
-    prev: str | None = None
+    if not bars_info:
+        return []
+    per_bar: list[dict[str, float]] = []
     for bs, be, *_r in bars_info:
-        label = _chord_for_time_range(raw_notes, bs, be, capo)
-        if not label:
-            label = prev if prev else "?"
-        out.append(label)
-        prev = label
-    return out
+        cand = _chord_candidate_scores_for_time_range(raw_notes, bs, be, capo)
+        per_bar.append(cand)
+
+    states: list[list[str]] = []
+    for c in per_bar:
+        keys = sorted(c.keys(), key=lambda k: c[k], reverse=True)
+        if not keys:
+            keys = ["?"]
+        states.append(keys[:6])
+
+    dp: list[dict[str, float]] = []
+    back: list[dict[str, str | None]] = []
+    for i, labels in enumerate(states):
+        dp.append({})
+        back.append({})
+        for lab in labels:
+            base_score = per_bar[i].get(lab, -0.35 if lab == "?" else -1e6)
+            if i == 0:
+                dp[i][lab] = base_score
+                back[i][lab] = None
+                continue
+            best = -1e18
+            best_prev: str | None = None
+            for prev_lab, prev_score in dp[i - 1].items():
+                penalty = 0.0 if lab == "?" or prev_lab == "?" else _transition_penalty(prev_lab, lab)
+                score = prev_score + base_score - penalty
+                if score > best:
+                    best = score
+                    best_prev = prev_lab
+            dp[i][lab] = best
+            back[i][lab] = best_prev
+
+    last_idx = len(states) - 1
+    best_last = max(dp[last_idx].keys(), key=lambda k: dp[last_idx][k])
+    out: list[str] = [best_last]
+    cur = best_last
+    for i in range(last_idx, 0, -1):
+        prev = back[i].get(cur)
+        out.append(prev if prev else "?")
+        cur = prev if prev else "?"
+    out.reverse()
+    filled: list[str] = []
+    prev_lab: str | None = None
+    for lab in out:
+        if lab == "?":
+            filled.append(prev_lab or "?")
+        else:
+            filled.append(lab)
+            prev_lab = lab
+    return filled
 
 
 # AlphaTex \\chord ("이름" s1..s6): 1번줄(하이E) → 6번줄(로우E), x = 뮤트
@@ -1111,6 +1922,267 @@ def _basic_pitch_to_midi(guitar_audio: Path, midi_out: Path) -> Path:
     return midi_out
 
 
+def _count_non_drum_midi_notes(midi: pretty_midi.PrettyMIDI) -> int:
+    return sum(len(inst.notes) for inst in midi.instruments if not inst.is_drum)
+
+
+def _cleanup_transcribed_midi(
+    midi: pretty_midi.PrettyMIDI,
+    *,
+    enabled: bool = MIDI_CLEANUP_ENABLED,
+    min_duration_sec: float = MIDI_CLEANUP_MIN_DURATION_SEC,
+    duplicate_start_tolerance_sec: float = MIDI_CLEANUP_DUPLICATE_START_TOLERANCE_SEC,
+    velocity_floor: int = MIDI_CLEANUP_VELOCITY_FLOOR,
+    velocity_relative_ratio: float = MIDI_CLEANUP_VELOCITY_RELATIVE_RATIO,
+    cleanup_strength: int = 1,
+) -> dict[str, Any]:
+    stats: dict[str, Any] = {
+        "enabled": bool(enabled),
+        "min_duration_sec": float(min_duration_sec),
+        "duplicate_start_tolerance_sec": float(duplicate_start_tolerance_sec),
+        "velocity_floor": int(velocity_floor),
+        "velocity_relative_ratio": float(velocity_relative_ratio),
+        "raw_midi_note_count": _count_non_drum_midi_notes(midi),
+        "cleaned_midi_note_count": 0,
+        "removed_short_note_count": 0,
+        "merged_duplicate_note_count": 0,
+        "removed_velocity_note_count": 0,
+        "fixed_invalid_note_count": 0,
+    }
+    if not enabled:
+        stats["cleaned_midi_note_count"] = stats["raw_midi_note_count"]
+        return stats
+
+    min_dur = max(1e-3, float(min_duration_sec))
+    dup_tol = max(0.0, float(duplicate_start_tolerance_sec))
+    strength = max(1, int(cleanup_strength))
+    density_peak_global = 0
+    for inst in midi.instruments:
+        if inst.is_drum or not inst.notes:
+            continue
+        # 한국어 주석: 잘못된 end/start를 먼저 보정해 후속 필터가 안전하게 동작하도록 한다.
+        valid_notes: list[pretty_midi.Note] = []
+        for n in inst.notes:
+            if n.end <= n.start:
+                n.end = n.start + 1e-3
+                stats["fixed_invalid_note_count"] += 1
+            valid_notes.append(n)
+
+        if not valid_notes:
+            inst.notes = []
+            continue
+
+        max_vel = max(int(n.velocity) for n in valid_notes)
+        vel_threshold = max(int(velocity_floor), int(round(max_vel * float(velocity_relative_ratio))))
+        starts = sorted(float(n.start) for n in valid_notes)
+        # 한국어 주석: 고밀도 구간일수록 짧은/약한 노트를 더 강하게 정리한다.
+        density_score = 0
+        if starts:
+            j = 0
+            for i, st in enumerate(starts):
+                while st - starts[j] > 0.60:
+                    j += 1
+                density_score = max(density_score, i - j + 1)
+        density_peak_global = max(density_peak_global, density_score)
+        dense_factor = 1.0
+        if density_score >= 16:
+            dense_factor = 1.65
+        elif density_score >= 12:
+            dense_factor = 1.45
+        elif density_score >= 8:
+            dense_factor = 1.25
+        dense_factor += 0.08 * float(max(0, strength - 1))
+        adaptive_min_dur = min(0.20, min_dur * dense_factor)
+        adaptive_dup_tol = min(0.16, dup_tol * (1.25 if dense_factor > 1.0 else 1.0) * (1.0 + 0.10 * float(strength - 1)))
+        adaptive_vel_threshold = min(
+            118,
+            int(round(vel_threshold * (1.20 if dense_factor > 1.0 else 1.0) * (1.0 + 0.07 * float(strength - 1)))),
+        )
+        dur_filtered: list[pretty_midi.Note] = []
+        for n in valid_notes:
+            duration = float(n.end) - float(n.start)
+            if duration < adaptive_min_dur:
+                stats["removed_short_note_count"] += 1
+                continue
+            if int(n.velocity) < adaptive_vel_threshold:
+                stats["removed_velocity_note_count"] += 1
+                continue
+            dur_filtered.append(n)
+
+        by_pitch: dict[int, list[pretty_midi.Note]] = {}
+        for n in dur_filtered:
+            by_pitch.setdefault(int(n.pitch), []).append(n)
+
+        merged_notes: list[pretty_midi.Note] = []
+        for arr in by_pitch.values():
+            arr_sorted = sorted(arr, key=lambda x: (float(x.start), -int(x.velocity), float(x.end)))
+            if not arr_sorted:
+                continue
+            cur = arr_sorted[0]
+            for nxt in arr_sorted[1:]:
+                if abs(float(nxt.start) - float(cur.start)) <= adaptive_dup_tol:
+                    cur.start = min(float(cur.start), float(nxt.start))
+                    cur.end = max(float(cur.end), float(nxt.end))
+                    cur.velocity = max(int(cur.velocity), int(nxt.velocity))
+                    stats["merged_duplicate_note_count"] += 1
+                else:
+                    merged_notes.append(cur)
+                    cur = nxt
+            merged_notes.append(cur)
+
+        merged_notes.sort(key=lambda x: (float(x.start), int(x.pitch), -int(x.velocity)))
+        # 한국어 주석: 강한 모드에서는 초단기 잔노트를 한 번 더 제거해 밀도를 낮춘다.
+        residual_min_dur = max(1e-3, adaptive_min_dur * (0.55 if strength >= 2 else 0.40))
+        final_notes: list[pretty_midi.Note] = []
+        for n in merged_notes:
+            if (float(n.end) - float(n.start)) < residual_min_dur:
+                stats["removed_short_note_count"] += 1
+                continue
+            final_notes.append(n)
+        inst.notes = final_notes
+
+    stats["cleaned_midi_note_count"] = _count_non_drum_midi_notes(midi)
+    stats["density_peak_per_600ms"] = int(density_peak_global)
+    return stats
+
+
+def _read_compare_f1(compare_report_path: Path) -> float:
+    try:
+        payload = json.loads(compare_report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 0.0
+    after_export = payload.get("compare_after_export") if isinstance(payload, dict) else {}
+    before_refine = payload.get("compare_before_refine") if isinstance(payload, dict) else {}
+    f1 = 0.0
+    if isinstance(after_export, dict):
+        f1 = max(f1, float(after_export.get("f1_onset_symmetric", 0.0)))
+    if isinstance(before_refine, dict):
+        f1 = max(f1, float(before_refine.get("f1_onset_symmetric", 0.0)))
+    return float(f1)
+
+
+def _score_candidate_components(
+    render_stats: dict[str, Any],
+    cleaned_ratio: float,
+    compare_f1: float,
+) -> dict[str, float]:
+    token_after = float(render_stats.get("token_counts", {}).get("after", 99999.0))
+    duration32 = float(render_stats.get("duration_32_ratio_after_pct", 100.0))
+    bar_density = float(render_stats.get("bar_density_p95", 999.0))
+    meter_fail = float(render_stats.get("meter_integrity", {}).get("fail", 1))
+    validator_fail = 0.0 if bool(render_stats.get("validator_passed", False)) else 1.0
+    voice_preservation = float(render_stats.get("voice_preservation_score", 0.0))
+    penalty_fret_jump_p95 = float(render_stats.get("penalty_fret_jump_p95", 0.0))
+    penalty_string_cross_rate = float(render_stats.get("penalty_string_cross_rate", 0.0))
+    penalty_attack_burst = float(render_stats.get("penalty_attack_burst", 0.0))
+    penalty_bar_overflow = float(render_stats.get("penalty_bar_overflow", 0.0))
+    penalty_duration_fragmentation = float(render_stats.get("penalty_duration_fragmentation", 0.0))
+    reward_phrase_continuity = float(render_stats.get("phrase_continuity_score", 0.0))
+    parts = {
+        "penalty_duration32": max(0.0, duration32 - 20.0) * 0.06,
+        "penalty_token_after": max(0.0, token_after - 180.0) * 0.004,
+        "penalty_bar_density": max(0.0, bar_density - 24.0) * 0.03,
+        "penalty_cleaned_ratio": max(0.0, cleaned_ratio - 0.72) * 1.1,
+        "penalty_meter_fail": meter_fail * 6.0,
+        "penalty_validator_fail": validator_fail * 12.0,
+        "penalty_fret_jump_p95": penalty_fret_jump_p95,
+        "penalty_string_cross_rate": penalty_string_cross_rate,
+        "penalty_attack_burst": penalty_attack_burst,
+        "penalty_bar_overflow": penalty_bar_overflow,
+        "penalty_duration_fragmentation": penalty_duration_fragmentation,
+        "reward_voice_preservation": max(0.0, voice_preservation) * 1.8,
+        "reward_compare_f1": max(0.0, compare_f1) * 2.2,
+        "reward_phrase_continuity": max(0.0, reward_phrase_continuity) * 1.6,
+    }
+    parts["playability_penalty_sum"] = (
+        parts["penalty_fret_jump_p95"] + parts["penalty_string_cross_rate"] + parts["penalty_attack_burst"]
+    )
+    parts["total_score"] = (
+        parts["penalty_duration32"]
+        + parts["penalty_token_after"]
+        + parts["penalty_bar_density"]
+        + parts["penalty_cleaned_ratio"]
+        + parts["penalty_meter_fail"]
+        + parts["penalty_validator_fail"]
+        + parts["penalty_fret_jump_p95"]
+        + parts["penalty_string_cross_rate"]
+        + parts["penalty_attack_burst"]
+        + parts["penalty_bar_overflow"]
+        + parts["penalty_duration_fragmentation"]
+        - parts["reward_voice_preservation"]
+        - parts["reward_compare_f1"]
+        - parts["reward_phrase_continuity"]
+    )
+    return {k: float(round(v, 6)) for k, v in parts.items()}
+
+
+def _score_candidate(
+    render_stats: dict[str, Any],
+    cleaned_ratio: float,
+    compare_f1: float,
+) -> float:
+    return float(_score_candidate_components(render_stats, cleaned_ratio, compare_f1)["total_score"])
+
+
+def _voice_aware_compact_note_events(
+    note_events: list[dict[str, Any]],
+    *,
+    melody_ioi_floor_sec: float,
+    accompaniment_ioi_floor_sec: float,
+) -> list[dict[str, Any]]:
+    if not note_events:
+        return []
+    events = [dict(n) for n in note_events]
+    for n in events:
+        if "pitch" not in n:
+            n["pitch"] = int(GUITAR_OPEN_MIDI[int(n["string"]) - 1]) + int(n["fret"])
+    events = sorted(events, key=lambda x: (float(x["start"]), -int(x["pitch"]), -int(x["velocity"])))
+
+    melody_ids: set[int] = set()
+    i = 0
+    while i < len(events):
+        st = float(events[i]["start"])
+        j = i + 1
+        bucket_best = i
+        while j < len(events) and float(events[j]["start"]) <= st + ONSET_TOLERANCE_SEC:
+            if int(events[j]["pitch"]) > int(events[bucket_best]["pitch"]):
+                bucket_best = j
+            j += 1
+        melody_ids.add(bucket_best)
+        i = j
+
+    compacted: list[dict[str, Any]] = []
+    last_by_pos: dict[tuple[int, int], dict[str, Any]] = {}
+    last_by_voice: dict[str, dict[str, Any]] = {}
+    for idx, n in enumerate(events):
+        pos = (int(n["string"]), int(n["fret"]))
+        is_melody = idx in melody_ids
+        voice_key = "melody" if is_melody else "accompaniment"
+        floor = float(melody_ioi_floor_sec if is_melody else accompaniment_ioi_floor_sec)
+
+        prev_pos = last_by_pos.get(pos)
+        if prev_pos is not None:
+            ioi_pos = float(n["start"]) - float(prev_pos["start"])
+            if ioi_pos < floor:
+                prev_pos["end"] = max(float(prev_pos["end"]), float(n["end"]))
+                prev_pos["velocity"] = max(int(prev_pos["velocity"]), int(n["velocity"]))
+                continue
+
+        prev_voice = last_by_voice.get(voice_key)
+        if prev_voice is not None:
+            ioi_voice = float(n["start"]) - float(prev_voice["start"])
+            if ioi_voice < floor and int(prev_voice["pitch"]) == int(n["pitch"]):
+                prev_voice["end"] = max(float(prev_voice["end"]), float(n["end"]))
+                prev_voice["velocity"] = max(int(prev_voice["velocity"]), int(n["velocity"]))
+                continue
+
+        compacted.append(n)
+        last_by_pos[pos] = n
+        last_by_voice[voice_key] = n
+
+    return sorted(compacted, key=lambda x: (float(x["start"]), int(x["string"]), int(x["fret"])))
+
+
 def _midi_note_to_string_fret(midi_pitch: int) -> tuple[int, int]:
     # 가장 낮은 프렛 우선 매핑
     best = (6, max(0, midi_pitch - GUITAR_OPEN_MIDI[-1]))
@@ -1136,7 +2208,7 @@ def _position_transition_cost(prev: tuple[int, int], nxt: tuple[int, int]) -> fl
     string, fret = nxt
 
     # 포지션 연속성 비용(이동량/점프/현실성 제약)
-    cost = abs(prev_fret - fret) + 0.35 * abs(prev_string - string)
+    cost = abs(prev_fret - fret) + 0.50 * abs(prev_string - string)
 
     # 개방현 우선(자연스러운 연주/손가락 부담 완화)
     if fret == 0:
@@ -1145,53 +2217,18 @@ def _position_transition_cost(prev: tuple[int, int], nxt: tuple[int, int]) -> fl
     # 과도한 점프 페널티
     jump = abs(prev_fret - fret)
     if jump > 10:
-        cost += (jump - 10) * 0.8
+        cost += (jump - 10) * 1.2
 
     return float(cost)
 
 
-def _nearest_onset_distance_sec(onset_times: list[float], t: float) -> float:
-    if not onset_times:
-        return float("inf")
-    i = bisect.bisect_left(onset_times, t)
-    d = float("inf")
-    if i < len(onset_times):
-        d = min(d, abs(onset_times[i] - t))
-    if i > 0:
-        d = min(d, abs(onset_times[i - 1] - t))
-    return d
-
-
-def _next_onset_after(onset_times: list[float], t: float) -> float | None:
-    if not onset_times:
-        return None
-    i = bisect.bisect_right(onset_times, t)
-    if i < len(onset_times):
-        return onset_times[i]
-    return None
-
-
-def _reduce_note_density_with_onsets(
+def _reduce_note_density(
     raw_notes: list[dict[str, Any]],
     *,
-    onset_times_sec: list[float] | None,
     quarter_sec: float,
 ) -> list[dict[str, Any]]:
     if not raw_notes:
         return raw_notes
-
-    onset_times = sorted(float(t) for t in (onset_times_sec or []) if t is not None)
-
-    # 3-A: onset 근접 노트 우선 유지
-    if onset_times:
-        gated: list[dict[str, Any]] = []
-        for n in raw_notes:
-            d = _nearest_onset_distance_sec(onset_times, float(n["start"]))
-            # onset에서 멀고 velocity가 약한 노트는 잔향/환상음으로 간주해 제거
-            if d <= ONSET_TOLERANCE_SEC or int(n["velocity"]) >= (MIN_NOTE_VELOCITY + 8):
-                gated.append(n)
-        if gated:
-            raw_notes = gated
 
     # 3-B: 동일 pitch의 과도한 촘촘 onset 병합
     min_ioi = max(MERGE_MIN_IOI_SEC, quarter_sec / 8.0)  # 대략 1/32 하한
@@ -1214,16 +2251,14 @@ def _reduce_note_density_with_onsets(
                 cur = dict(nxt)
         merged.append(cur)
 
-    # 3-D: 지속 길이 상한 (다음 onset 직전 또는 최대 N박)
+    # 3-D: 지속 길이 상한 (최대 N박)
     clamped: list[dict[str, Any]] = []
     max_sustain_sec = quarter_sec * MAX_SUSTAIN_BEATS
     for n in sorted(merged, key=lambda x: (float(x["start"]), int(x["pitch"]))):
         start = float(n["start"])
         end = float(n["end"])
-        next_onset = _next_onset_after(onset_times, start + 1e-6) if onset_times else None
         cap1 = start + max_sustain_sec
-        cap2 = (next_onset + SUSTAIN_RELEASE_SEC) if next_onset is not None else cap1
-        new_end = min(end, cap1, cap2)
+        new_end = min(end, cap1)
         if new_end <= start + 1e-3:
             continue
         clamped.append(
@@ -1240,8 +2275,6 @@ def _reduce_note_density_with_onsets(
 def _quantized_beats_from_midi(
     midi: pretty_midi.PrettyMIDI,
     tempo: float,
-    *,
-    onset_times_sec: list[float] | None = None,
 ) -> tuple[list[dict[str, Any]], float]:
     """
     MIDI note start/end를 1/16 단위로 기본 양자화하고,
@@ -1250,9 +2283,8 @@ def _quantized_beats_from_midi(
 
     quarter = 60.0 / max(1.0, tempo)
     step_16 = quarter / 4.0  # 1/16
-    step_32 = step_16 / 2.0  # 1/32
 
-    # 1/16 vs 1/32에서 start/end 스냅 오차를 비교해 그리드 선택
+    # S9: 16분 고정. 32분 그리드는 과밀 표기를 유발하므로 비활성화한다.
     melodic_instruments = [inst for inst in midi.instruments if not inst.is_drum and inst.notes]
     if not melodic_instruments:
         melodic_instruments = [inst for inst in midi.instruments if inst.notes]
@@ -1275,9 +2307,8 @@ def _quantized_beats_from_midi(
                 }
             )
 
-    candidate_raw_notes = _reduce_note_density_with_onsets(
+    candidate_raw_notes = _reduce_note_density(
         candidate_raw_notes,
-        onset_times_sec=onset_times_sec,
         quarter_sec=quarter,
     )
 
@@ -1295,20 +2326,7 @@ def _quantized_beats_from_midi(
             step_16,
         )
 
-    def snap_error(note_time: float, step: float) -> float:
-        snapped = round(note_time / step) * step
-        return abs(note_time - snapped)
-
-    start_err_16 = [snap_error(n["start"], step_16) for n in candidate_raw_notes]
-    end_err_16 = [snap_error(n["end"], step_16) for n in candidate_raw_notes]
-    start_err_32 = [snap_error(n["start"], step_32) for n in candidate_raw_notes]
-    end_err_32 = [snap_error(n["end"], step_32) for n in candidate_raw_notes]
-
-    median_err_16 = statistics.median(start_err_16 + end_err_16)
-    median_err_32 = statistics.median(start_err_32 + end_err_32)
-    any_32_needed = any((n["end"] - n["start"]) <= step_16 * 0.75 for n in candidate_raw_notes)
-
-    step = step_32 if any_32_needed and median_err_32 <= median_err_16 * 0.6 else step_16
+    step = step_16
 
     # slot -> raw note list (여기서 아직 string/fret은 DP 후에 결정)
     slots: dict[int, list[dict[str, Any]]] = {}
@@ -1459,6 +2477,17 @@ def _quantized_beats_from_midi(
 
         prev_lead_pos = best_lead_pos[k]
 
+    # 한국어 주석: 같은 string/fret 재타격 시 이전 음을 조기 종료해 sustain 겹침을 완화한다.
+    last_by_position: dict[tuple[int, int], dict[str, Any]] = {}
+    for beat in beats:
+        beat_start = float(beat.get("time", 0.0))
+        for n in beat.get("notes", []):
+            key = (int(n["string"]), int(n["fret"]))
+            prev = last_by_position.get(key)
+            if prev is not None and float(prev["end"]) > beat_start + 1e-3:
+                prev["end"] = max(float(prev["start"]) + 1e-3, beat_start + (SUSTAIN_RELEASE_SEC * 0.25))
+            last_by_position[key] = n
+
     return beats, step
 
 
@@ -1471,8 +2500,16 @@ def _midi_to_alphatex(
     audio_duration_sec: float | None = None,
     capo: int = 0,
     tempo_override: float | None = None,
-    onset_times_sec: list[float] | None = None,
     tab_output_dir: Path | None = None,
+    render_stats_out: dict[str, Any] | None = None,
+    duration_32_ratio_target_pct: float = DURATION_32_RATIO_TARGET_PCT,
+    bar_32_ratio_limit_pct: float = BAR_32_RATIO_LIMIT_PCT,
+    bar_32_max_count: int = 4,
+    bar_attack_max_count: int = BAR_ATTACK_MAX_COUNT,
+    chord_first_simplify: bool = CHORD_FIRST_SIMPLIFY,
+    accompaniment_limit: int = 2,
+    melody_ioi_floor_sec: float = 0.055,
+    accompaniment_ioi_floor_sec: float = 0.105,
 ) -> str:
     midi = pretty_midi.PrettyMIDI(str(midi_path))
     tempo_segments = _parse_tempo_segments(midi)
@@ -1488,7 +2525,7 @@ def _midi_to_alphatex(
 
     inst_name = _midi_program_to_alphatab_instrument(_get_primary_midi_program(midi))
 
-    beats, _grid_step_sec = _quantized_beats_from_midi(midi, tempo0, onset_times_sec=onset_times_sec)
+    beats, _grid_step_sec = _quantized_beats_from_midi(midi, tempo0)
     beats = sorted(beats, key=lambda b: float(b.get("time", 0.0)))
 
     suppress_mid_bar_midi_tempo = tempo_override is not None
@@ -1507,6 +2544,7 @@ def _midi_to_alphatex(
                     "start": float(n["start"]),
                     "end": float(n["end"]),
                     "velocity": int(n.get("velocity", 64)),
+                    "pitch": int(GUITAR_OPEN_MIDI[int(n["string"]) - 1]) + int(n["fret"]),
                 }
             )
 
@@ -1514,6 +2552,75 @@ def _midi_to_alphatex(
         note_events, _ref_passes = refine_note_events_with_reference_midi(
             note_events, midi_path, max_passes=2
         )
+        note_events = _voice_aware_compact_note_events(
+            note_events,
+            melody_ioi_floor_sec=float(melody_ioi_floor_sec),
+            accompaniment_ioi_floor_sec=float(accompaniment_ioi_floor_sec),
+        )
+    analysis_note_events = [dict(n) for n in note_events]
+
+    def _build_render_note_events_with_adaptive_hold(
+        events: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], dict[str, dict[str, float]]]:
+        if not events:
+            return [], {
+                "melody": {"min_hold_sec": 0.14, "max_hold_sec": 0.62},
+                "bass": {"min_hold_sec": 0.12, "max_hold_sec": 0.52},
+                "accompaniment": {"min_hold_sec": 0.08, "max_hold_sec": 0.34},
+            }
+        profile = {
+            "melody": {"min_hold_sec": 0.14, "max_hold_sec": 0.62},
+            "bass": {"min_hold_sec": 0.12, "max_hold_sec": 0.52},
+            "accompaniment": {"min_hold_sec": 0.08, "max_hold_sec": 0.34},
+        }
+        grouped: dict[float, list[dict[str, Any]]] = {}
+        for n in sorted(events, key=lambda x: (float(x["start"]), int(x.get("pitch", 0)))):
+            st = round(float(n["start"]), 6)
+            grouped.setdefault(st, []).append(dict(n))
+        onsets = sorted(grouped.keys())
+        out: list[dict[str, Any]] = []
+        for idx, onset in enumerate(onsets):
+            cur = grouped[onset]
+            next_onset = onsets[idx + 1] if idx + 1 < len(onsets) else None
+            margin = 0.015
+            if next_onset is not None and next_onset > onset:
+                margin = min(0.02, max(0.008, (next_onset - onset) * 0.12))
+            pitches = [int(it.get("pitch", 0)) for it in cur]
+            top_pitch = max(pitches) if pitches else -999
+            low_pitch = min(pitches) if pitches else 999
+            for n in cur:
+                nn = dict(n)
+                p = int(nn.get("pitch", 0))
+                role = "accompaniment"
+                if p == top_pitch:
+                    role = "melody"
+                elif p == low_pitch:
+                    role = "bass"
+                min_hold = float(profile[role]["min_hold_sec"])
+                max_hold = float(profile[role]["max_hold_sec"])
+                ceiling = float(nn["start"]) + max_hold
+                if next_onset is not None:
+                    ceiling = min(ceiling, float(next_onset) - margin)
+                new_end = max(float(nn["start"]) + min_hold, min(float(nn["end"]), ceiling))
+                nn["end"] = max(float(nn["start"]) + 1e-3, new_end)
+                out.append(nn)
+        return sorted(out, key=lambda x: (float(x["start"]), int(x["string"]), int(x["fret"]))), profile
+
+    render_note_events, voice_hold_profile = _build_render_note_events_with_adaptive_hold(analysis_note_events)
+    note_events = render_note_events
+    play_jump_values: list[float] = []
+    play_string_cross = 0
+    play_total_pairs = 0
+    if len(note_events) >= 2:
+        ordered = sorted(note_events, key=lambda x: (float(x["start"]), int(x["string"]), int(x["fret"])))
+        prev = ordered[0]
+        for cur in ordered[1:]:
+            play_total_pairs += 1
+            jump = abs(int(cur["fret"]) - int(prev["fret"]))
+            play_jump_values.append(float(jump))
+            if int(cur["string"]) != int(prev["string"]):
+                play_string_cross += 1
+            prev = cur
 
     base_den = 16
     eps = 1e-6
@@ -1536,6 +2643,9 @@ def _midi_to_alphatex(
     chord_def_block = _alphatex_chord_definitions_block(chord_order_unique)
     capo_line = f"\\capo {int(capo)}\n" if int(capo) > 0 else ""
 
+    # 한국어 주석: 온셋 중심 렌더 모드(기본 True), 필요 시 기존 경계 방식 fallback.
+    ATTACK_ONLY_RENDER = True
+
     def uniq_sorted(values: list[float]) -> list[float]:
         values_sorted = sorted(values)
         out: list[float] = []
@@ -1544,7 +2654,273 @@ def _midi_to_alphatex(
                 out.append(round(v, 6))
         return out
 
+    def build_onset_boundaries() -> list[float]:
+        boundaries: set[float] = {0.0, last_bar_end}
+        for bs, be, *_r in bars_info:
+            boundaries.add(float(bs))
+            boundaries.add(float(be))
+        if ATTACK_ONLY_RENDER:
+            for n in note_events:
+                boundaries.add(float(n["start"]))
+        else:
+            for n in note_events:
+                boundaries.add(float(n["start"]))
+                boundaries.add(float(n["end"]))
+        return uniq_sorted(list(boundaries))
+
+    def _token_duration_units(tok: str) -> float:
+        stripped = tok.lstrip()
+        if not stripped.startswith(":"):
+            return float(16.0 / base_den)
+        m = re.match(r"^:(\d+)\b", stripped)
+        if not m:
+            return float(16.0 / base_den)
+        den = max(1, int(m.group(1)))
+        return float(16.0 / den)
+
+    def _parse_token(tok: str) -> tuple[int, str]:
+        stripped = tok.strip()
+        m = re.match(r"^:(\d+)\s+(.+)$", stripped)
+        if m:
+            return max(1, int(m.group(1))), m.group(2).strip()
+        return base_den, stripped
+
+    def _format_token(den: int, content: str) -> str:
+        if den == base_den:
+            return content
+        return f":{den} {content}"
+
+    def _merge_two_32(content: str) -> str:
+        if content == "r":
+            return ":16 r"
+        return f":16 {content}"
+
+    def _is_weak_token_content(content: str) -> bool:
+        lowered = content.lower()
+        if content.strip() == "r":
+            return True
+        return "{dy ppp}" in lowered or "{dy pp}" in lowered or "{dy p}" in lowered
+
+    def _units_to_den(units: float) -> int | None:
+        table = {
+            0.5: 32,
+            1.0: 16,
+            2.0: 8,
+            4.0: 4,
+            8.0: 2,
+            16.0: 1,
+        }
+        for k, v in table.items():
+            if abs(units - k) <= 1e-6:
+                return v
+        return None
+
+    def _optimize_bar_tokens_for_readability(
+        tokens: list[str],
+        snapshots: list[tuple[tuple[int, int], ...]],
+        measure_units_target: float,
+    ) -> tuple[list[str], list[tuple[tuple[int, int], ...]]]:
+        if not tokens:
+            return tokens, snapshots
+        if len(tokens) != len(snapshots):
+            return tokens, snapshots
+
+        # 한국어 주석: 약한 32분 토큰을 먼저 정리해 뒤 단계 병합 효율을 높인다.
+        lowered_tokens: list[str] = []
+        lowered_snaps: list[tuple[tuple[int, int], ...]] = []
+        for tok in tokens:
+            den, content = _parse_token(tok)
+            if den == 32 and "{dy ppp}" in content:
+                lowered_tokens.append(_format_token(den, _strip_dy_from_alphatex_note_token(content)))
+            elif den == 32 and ("{dy pp}" in content or "{dy p}" in content):
+                lowered_tokens.append(":32 r")
+            else:
+                lowered_tokens.append(tok)
+        lowered_snaps.extend(snapshots)
+
+        packed: list[str] = []
+        packed_snaps: list[tuple[tuple[int, int], ...]] = []
+        i = 0
+        while i < len(lowered_tokens):
+            cur = lowered_tokens[i]
+            den, content = _parse_token(cur)
+            if den == 32:
+                j = i + 1
+                while j < len(lowered_tokens):
+                    den_j, content_j = _parse_token(lowered_tokens[j])
+                    if den_j != 32:
+                        break
+                    if lowered_snaps[j] != lowered_snaps[i]:
+                        break
+                    if content_j != content and not (_is_weak_token_content(content_j) or _is_weak_token_content(content)):
+                        break
+                    j += 1
+                count = j - i
+                while count >= 2:
+                    if content == "r":
+                        merged_content = "r"
+                    else:
+                        merged_content = content if not _is_weak_token_content(content) else _strip_dy_from_alphatex_note_token(content)
+                    packed.append(_merge_two_32(merged_content))
+                    packed_snaps.append(lowered_snaps[i])
+                    count -= 2
+                if count == 1:
+                    packed.append(_format_token(32, content))
+                    packed_snaps.append(lowered_snaps[i])
+                i = j
+                continue
+            packed.append(cur)
+            packed_snaps.append(lowered_snaps[i])
+            i += 1
+
+        # 한국어 주석: 동일 snapshot/동일 내용의 인접 토큰은 길이 확장으로 재압축한다.
+        merged_tokens: list[str] = []
+        merged_snaps: list[tuple[tuple[int, int], ...]] = []
+        i = 0
+        while i < len(packed):
+            den, content = _parse_token(packed[i])
+            if i + 1 < len(packed):
+                den2, content2 = _parse_token(packed[i + 1])
+                if (
+                    packed_snaps[i] == packed_snaps[i + 1]
+                    and den == den2
+                    and content == content2
+                    and den > 1
+                ):
+                    merged_tokens.append(_format_token(max(1, den // 2), content))
+                    merged_snaps.append(packed_snaps[i])
+                    i += 2
+                    continue
+            merged_tokens.append(packed[i])
+            merged_snaps.append(packed_snaps[i])
+            i += 1
+
+        units_after = sum(_token_duration_units(tok) for tok in merged_tokens)
+        if abs(float(units_after) - float(measure_units_target)) > 1e-3:
+            return tokens, snapshots
+        attack_cap = max(1, int(bar_attack_max_count))
+        while True:
+            attack_indices = [
+                i for i, tok in enumerate(merged_tokens) if _parse_token(tok)[1] != "r"
+            ]
+            if len(attack_indices) <= attack_cap:
+                break
+            changed = False
+            for idx in attack_indices:
+                if idx + 1 >= len(merged_tokens):
+                    continue
+                den1, c1 = _parse_token(merged_tokens[idx])
+                den2, c2 = _parse_token(merged_tokens[idx + 1])
+                if merged_snaps[idx] != merged_snaps[idx + 1]:
+                    continue
+                if not (_is_weak_token_content(c1) or _is_weak_token_content(c2)):
+                    continue
+                units = _token_duration_units(merged_tokens[idx]) + _token_duration_units(merged_tokens[idx + 1])
+                merged_den = _units_to_den(units)
+                if merged_den is None:
+                    continue
+                preferred = c1 if not _is_weak_token_content(c1) else c2
+                merged_tokens[idx : idx + 2] = [_format_token(merged_den, preferred)]
+                merged_snaps[idx : idx + 2] = [merged_snaps[idx]]
+                changed = True
+                break
+            if not changed:
+                weak_idx = next(
+                    (i for i in attack_indices if _is_weak_token_content(_parse_token(merged_tokens[i])[1])),
+                    attack_indices[-1],
+                )
+                merged_tokens[weak_idx] = _format_token(_parse_token(merged_tokens[weak_idx])[0], "r")
+                changed = True
+            if not changed:
+                break
+        return merged_tokens, merged_snaps
+
+    def merge_redundant_sustain_segments(
+        chunks: list[tuple[float, float, tuple[tuple[int, int], ...], str, str]]
+    ) -> tuple[list[list[Any]], int]:
+        merged_rows_local: list[list[Any]] = []
+        repeated_pairs = 0
+        for t0b, t1b, snap, full_tok, base_tok in chunks:
+            if merged_rows_local and snap == merged_rows_local[-1][2] and abs(t0b - merged_rows_local[-1][1]) < 1e-5:
+                merged_rows_local[-1][1] = t1b
+                repeated_pairs += 1
+            else:
+                merged_rows_local.append([t0b, t1b, snap, full_tok, base_tok])
+        return merged_rows_local, repeated_pairs
+
+    def _build_chunks_from_boundaries(
+        boundaries: list[float],
+    ) -> list[tuple[float, float, tuple[tuple[int, int], ...], str, str]]:
+        prev_dy_local: str | None = None
+        out_chunks: list[tuple[float, float, tuple[tuple[int, int], ...], str, str]] = []
+        for idx in range(len(boundaries) - 1):
+            t0b = float(boundaries[idx])
+            t1b = float(boundaries[idx + 1])
+            if t1b <= t0b + eps:
+                continue
+            snap = _tab_snapshot_key(note_events, t0b, eps)
+            full_tok, prev_dy_local = active_content_with_dy(t0b, prev_dy_local)
+            base_tok = _strip_dy_from_alphatex_note_token(full_tok)
+            out_chunks.append((t0b, t1b, snap, full_tok, base_tok))
+        return out_chunks
+
+    def _estimate_counts_for_rows(rows: list[list[Any]]) -> tuple[int, int]:
+        sim_bar_idx = 0
+        sim_bar_units = 0.0
+        sim_tokens = 0
+        sim_repeat = 0
+        prev_snap: tuple[tuple[int, int], ...] | None = None
+        for row in rows:
+            st, en, snap = float(row[0]), float(row[1]), row[2]
+            ct = st
+            while ct < en - eps and sim_bar_idx < len(bars_info):
+                while sim_bar_idx < len(bars_info) and ct >= float(bars_info[sim_bar_idx][1]) - eps:
+                    sim_bar_idx += 1
+                    sim_bar_units = 0.0
+                if sim_bar_idx >= len(bars_info):
+                    break
+                _bs_r, be_r, _nr, _dr, bpm_r, measure_units_target = bars_info[sim_bar_idx]
+                base_unit_sec = (60.0 / max(20.0, bpm_r)) / 4.0
+                chunk_end = min(en, float(be_r))
+                chunk_sec = max(0.0, chunk_end - ct)
+                if chunk_sec <= eps:
+                    ct = chunk_end
+                    continue
+                rem_u = chunk_sec / base_unit_sec
+                while rem_u > 1e-6 and sim_bar_idx < len(bars_info):
+                    room = float(measure_units_target) - sim_bar_units
+                    if room <= 1e-9:
+                        sim_bar_idx += 1
+                        sim_bar_units = 0.0
+                        if sim_bar_idx < len(bars_info):
+                            measure_units_target = bars_info[sim_bar_idx][5]
+                        continue
+                    nu = 0.0
+                    for d in (1, 2, 4, 8, 16, 32):
+                        nn = 16.0 / d
+                        if nn <= rem_u + 1e-6 and nn <= room + 1e-6:
+                            nu = nn
+                            break
+                    if nu <= 0.0:
+                        nu = 0.5
+                        if nu > room + 1e-6:
+                            sim_bar_idx += 1
+                            sim_bar_units = 0.0
+                            if sim_bar_idx < len(bars_info):
+                                measure_units_target = bars_info[sim_bar_idx][5]
+                            continue
+                    sim_tokens += 1
+                    if snap and prev_snap == snap:
+                        sim_repeat += 1
+                    if snap:
+                        prev_snap = snap
+                    sim_bar_units += nu
+                    rem_u -= nu
+                ct = chunk_end
+        return sim_tokens, sim_repeat
+
     def active_content_with_dy(t0: float, prev_dy: str | None) -> tuple[str, str | None]:
+        nonlocal voice_reference_count, voice_preserved_count
         active: list[dict[str, Any]] = [
             n for n in note_events if n["start"] <= t0 + eps and n["end"] > t0 + eps
         ]
@@ -1562,6 +2938,23 @@ def _midi_to_alphatex(
                 by_string[s] = n
 
         chosen = sorted(by_string.values(), key=lambda x: (x["string"], x["fret"]))
+        if chosen:
+            pitch_of = lambda x: int(x.get("pitch", GUITAR_OPEN_MIDI[int(x["string"]) - 1] + int(x["fret"])))
+            top_note = max(chosen, key=pitch_of)
+            bass_note = min(chosen, key=pitch_of)
+            picked: list[dict[str, Any]] = [top_note]
+            if bass_note is not top_note:
+                picked.append(bass_note)
+            remain = [n for n in chosen if n not in picked]
+            remain = sorted(remain, key=lambda x: (-int(x["velocity"]), -pitch_of(x)))
+            if chord_first_simplify:
+                remain_cap = 0
+            else:
+                remain_cap = max(0, int(accompaniment_limit) - (2 if bass_note is not top_note else 1))
+            picked.extend(remain[:remain_cap])
+            chosen = sorted(picked, key=lambda x: (x["string"], x["fret"]))
+            voice_reference_count += 1
+            voice_preserved_count += 1
         max_vel = max(int(n["velocity"]) for n in chosen)
         dy = _velocity_to_dy(max_vel)
         if len(chosen) == 1:
@@ -1588,40 +2981,219 @@ def _midi_to_alphatex(
     printed_bpm: float = first_bpm
 
     last_bar_end = bars_info[-1][1] if bars_info else 0.0
-    boundaries: set[float] = {0.0, last_bar_end}
-    for n in note_events:
-        boundaries.add(float(n["start"]))
-        boundaries.add(float(n["end"]))
-    for bs, be, *_r in bars_info:
-        boundaries.add(bs)
-        boundaries.add(be)
-    sorted_boundaries = uniq_sorted(list(boundaries))
+    sorted_boundaries = build_onset_boundaries()
+    if len(sorted_boundaries) < 2:
+        # 한국어 주석: 경계가 비정상적으로 적으면 기존 start/end 분할로 복구.
+        ATTACK_ONLY_RENDER = False
+        sorted_boundaries = build_onset_boundaries()
+
+    def _safe_median(values: list[float], fallback: float) -> float:
+        if not values:
+            return fallback
+        arr = sorted(values)
+        return float(arr[len(arr) // 2])
+
+    def _bar_onset_metrics(bar_start: float, bar_end: float) -> tuple[int, float]:
+        hits = sorted(
+            {
+                round(float(n["start"]), 6)
+                for n in note_events
+                if (bar_start - 1e-6) <= float(n["start"]) < (bar_end - 1e-6)
+            }
+        )
+        if len(hits) < 2:
+            return len(hits), max(0.08, float(bar_end - bar_start))
+        ioi = [max(1e-4, hits[i + 1] - hits[i]) for i in range(len(hits) - 1)]
+        return len(hits), _safe_median(ioi, max(0.08, float(bar_end - bar_start)))
+
+    def _resolve_bar_base_den(bpm: float, bar_onset_count: int, median_ioi_sec: float, bar_duration_sec: float) -> int:
+        if bpm < 76.0 and bar_onset_count <= 2 and median_ioi_sec >= max(0.20, bar_duration_sec * 0.32):
+            return 4
+        if bpm < 85.0 and bar_onset_count <= 4 and median_ioi_sec >= 0.14:
+            return 8
+        if bpm < 85.0 and bar_onset_count <= 5:
+            return 8
+        if 85.0 <= bpm <= 120.0:
+            return 16
+        if bar_onset_count <= 3 and median_ioi_sec >= 0.18:
+            return 8
+        return 16
+
+    def _resolve_max_nodes_per_bar(base_den_local: int, bpm: float, onset_count: int) -> int:
+        base_cap = 8 if base_den_local == 8 else (6 if base_den_local == 4 else 12)
+        bpm_bias = 2 if bpm < 80.0 else (0 if bpm < 120.0 else -1)
+        density_bias = 2 if onset_count <= 3 else (0 if onset_count <= 8 else -2)
+        return max(4, base_cap + bpm_bias + density_bias)
+
+    bar_render_profile: dict[int, dict[str, float]] = {}
+    for idx_b, (bs, be, _n, _d, bpm_b, _mu) in enumerate(bars_info):
+        onset_count_b, med_ioi_b = _bar_onset_metrics(float(bs), float(be))
+        bar_duration_b = max(0.001, float(be) - float(bs))
+        base_den_b = _resolve_bar_base_den(float(bpm_b), int(onset_count_b), float(med_ioi_b), bar_duration_b)
+        max_nodes_b = _resolve_max_nodes_per_bar(base_den_b, float(bpm_b), int(onset_count_b))
+        bar_render_profile[idx_b] = {
+            "base_den": float(base_den_b),
+            "max_nodes_per_bar": float(max_nodes_b),
+            "bar_onset_count": float(onset_count_b),
+            "median_ioi_sec": float(med_ioi_b),
+        }
 
     bar_idx = 0
     bar_tokens: list[str] = []
+    bar_snapshots: list[tuple[tuple[int, int], ...]] = []
     bar_units = 0.0
+    emitted_token_count = 0
+    emitted_32_count = 0
+    emitted_rest_count = 0
+    emitted_repeat_snapshot = 0
+    last_emitted_snapshot: tuple[tuple[int, int], ...] | None = None
+    meter_ok_count = 0
+    meter_fail_count = 0
+    bar_32_count = 0
+    bar_token_count = 0
+    bar_token_densities: list[int] = []
+    bar_node_counts: list[int] = []
+    bar_attack_counts: list[int] = []
+    bar_duration_fragmentation_values: list[float] = []
+    bar_overflow_count = 0
+    bar_attack_cap_applied_count = 0
+    voice_reference_count = 0
+    voice_preserved_count = 0
+    bar_32_cap_applied_count = 0
 
     def flush_bar() -> None:
-        nonlocal bar_tokens, bar_units, bar_idx, printed_ts, printed_bpm
+        nonlocal bar_tokens, bar_snapshots, bar_units, bar_idx, printed_ts, printed_bpm, meter_ok_count, meter_fail_count
+        nonlocal bar_32_count, bar_token_count, bar_token_densities, emitted_token_count, emitted_32_count
+        nonlocal bar_32_cap_applied_count, bar_overflow_count, bar_attack_cap_applied_count
         if bar_idx >= len(bars_info):
             return
         bs, be, num, den, bpm, measure_units_target = bars_info[bar_idx]
+        profile = bar_render_profile.get(bar_idx, {})
+        target_base_den = int(profile.get("base_den", float(base_den)))
+        max_nodes_per_bar = max(4, int(profile.get("max_nodes_per_bar", 12)))
+        # 한국어 주석: 마디 길이가 초과되면 뒤쪽 토큰부터 정리해 박자 예산을 맞춘다.
+        while bar_units > measure_units_target + 1e-6 and bar_tokens:
+            removed = bar_tokens.pop()
+            bar_units -= _token_duration_units(removed)
         while bar_units < measure_units_target - 1e-6:
             remaining = measure_units_target - bar_units
             if remaining >= 1.0 - 1e-6:
                 bar_tokens.append("r")
+                bar_snapshots.append(tuple())
                 bar_units += 1.0
+                bar_token_count += 1
             elif remaining >= 0.5 - 1e-6:
-                bar_tokens.append(":32 r")
-                bar_units += 0.5
+                if bar_token_count > 0 and (bar_32_count * 100.0 / max(1, bar_token_count)) > bar_32_ratio_limit_pct:
+                    bar_tokens.append(":16 r")
+                    bar_snapshots.append(tuple())
+                    bar_units += 1.0
+                else:
+                    bar_tokens.append(":32 r")
+                    bar_snapshots.append(tuple())
+                    bar_units += 0.5
+                    bar_32_count += 1
+                bar_token_count += 1
             else:
                 break
+        before_count = len(bar_tokens)
+        before_32 = sum(1 for tok in bar_tokens if _parse_token(tok)[0] == 32)
+        optimized_tokens, optimized_snaps = _optimize_bar_tokens_for_readability(
+            bar_tokens,
+            bar_snapshots,
+            float(measure_units_target),
+        )
+        bar_tokens = optimized_tokens
+        bar_snapshots = optimized_snaps
+        # 한국어 주석: 마디 cap 초과 시 약한 토큰부터 흡수해 밀도를 낮춘다.
+        while len(bar_tokens) > max_nodes_per_bar and bar_tokens:
+            bar_overflow_count += 1
+            bar_attack_cap_applied_count += 1
+            weak_idx = next(
+                (
+                    i
+                    for i, tok in enumerate(bar_tokens)
+                    if _is_weak_token_content(_parse_token(tok)[1]) and _parse_token(tok)[1] != "r"
+                ),
+                None,
+            )
+            if weak_idx is None:
+                weak_idx = next((i for i, tok in enumerate(bar_tokens) if _parse_token(tok)[1] == "r"), None)
+            if weak_idx is None:
+                weak_idx = len(bar_tokens) - 1
+            bar_tokens[weak_idx] = _format_token(_parse_token(bar_tokens[weak_idx])[0], "r")
+            compacted_tokens, compacted_snaps = _optimize_bar_tokens_for_readability(
+                bar_tokens,
+                bar_snapshots,
+                float(measure_units_target),
+            )
+            if len(compacted_tokens) >= len(bar_tokens):
+                break
+            bar_tokens = compacted_tokens
+            bar_snapshots = compacted_snaps
+        while sum(1 for tok in bar_tokens if _parse_token(tok)[0] == 32) > max(0, int(bar_32_max_count)):
+            changed = False
+            for idx in range(len(bar_tokens) - 1):
+                d1, c1 = _parse_token(bar_tokens[idx])
+                d2, c2 = _parse_token(bar_tokens[idx + 1])
+                if d1 == 32 and d2 == 32:
+                    merged = _merge_two_32(c1 if c1 == c2 else "r")
+                    bar_tokens[idx : idx + 2] = [merged]
+                    bar_snapshots[idx : idx + 2] = [bar_snapshots[idx]]
+                    bar_32_cap_applied_count += 1
+                    changed = True
+                    break
+            if not changed:
+                weak_idx = next(
+                    (i for i, tok in enumerate(bar_tokens) if _parse_token(tok)[0] == 32 and _is_weak_token_content(_parse_token(tok)[1])),
+                    None,
+                )
+                if weak_idx is None:
+                    weak_idx = next((i for i, tok in enumerate(bar_tokens) if _parse_token(tok)[0] == 32), None)
+                if weak_idx is None:
+                    break
+                bar_tokens[weak_idx] = ":16 r"
+                bar_32_cap_applied_count += 1
+                changed = True
+            if not changed:
+                break
+        bar_units = sum(_token_duration_units(tok) for tok in bar_tokens)
+        if abs(float(bar_units) - float(measure_units_target)) > 1e-3:
+            bar_tokens = optimized_tokens
+            bar_snapshots = optimized_snaps
+            bar_units = sum(_token_duration_units(tok) for tok in bar_tokens)
+        after_count = len(bar_tokens)
+        after_32 = sum(1 for tok in bar_tokens if _parse_token(tok)[0] == 32)
+        emitted_token_count = max(0, emitted_token_count + (after_count - before_count))
+        emitted_32_count = max(0, emitted_32_count + (after_32 - before_32))
+        bar_token_count = after_count
+        bar_32_count = after_32
+        if abs(float(bar_units) - float(measure_units_target)) <= 1e-3:
+            meter_ok_count += 1
+        else:
+            meter_fail_count += 1
         if not bar_tokens:
             bar_idx += 1
             return
-        first = bar_tokens[0]
-        if not first.lstrip().startswith(":"):
-            bar_tokens[0] = f":{base_den} {first}"
+        attack_count = sum(1 for tok in bar_tokens if _parse_token(tok)[1] != "r")
+        bar_node_counts.append(len(bar_tokens))
+        bar_attack_counts.append(attack_count)
+        dens_kinds = {int(_parse_token(tok)[0]) for tok in bar_tokens}
+        bar_duration_fragmentation_values.append(float(max(0, len(dens_kinds) - 1)))
+        bar_token_densities.append(len(bar_tokens))
+        compacted_bar: list[str] = []
+        prev_den = target_base_den
+        for idx_tok, tok in enumerate(bar_tokens):
+            den_tok, content_tok = _parse_token(tok)
+            if idx_tok == 0:
+                compacted_bar.append(f":{target_base_den} {content_tok}")
+                prev_den = target_base_den
+                continue
+            if den_tok == prev_den:
+                compacted_bar.append(content_tok)
+            else:
+                compacted_bar.append(f":{den_tok} {content_tok}")
+                prev_den = den_tok
+        bar_tokens = compacted_bar
         ch_lbl = bar_chords[bar_idx] if bar_idx < len(bar_chords) else ""
         if ch_lbl:
             bar_tokens[0] = _merge_chord_into_beat_token(bar_tokens[0], ch_lbl)
@@ -1642,12 +3214,17 @@ def _midi_to_alphatex(
         prefix = (" ".join(meta_parts) + " ") if meta_parts else ""
         bars.append(f"{prefix}{' '.join(bar_tokens)} |")
         bar_tokens = []
+        bar_snapshots = []
         bar_units = 0.0
+        bar_32_count = 0
+        bar_token_count = 0
         bar_idx += 1
 
     # 동일 운지가 이어지는 구간을 병합한 뒤, 16분 단위로 그리디 분해해 토큰을 만든다.
     prev_dy_m: str | None = None
     raw_chunks: list[tuple[float, float, tuple[tuple[int, int], ...], str, str]] = []
+    merged_rows: list[list[Any]] = []
+    merged_repeat_pairs = 0
     for idx in range(len(sorted_boundaries) - 1):
         t0b = float(sorted_boundaries[idx])
         t1b = float(sorted_boundaries[idx + 1])
@@ -1658,17 +3235,19 @@ def _midi_to_alphatex(
         base_tok = _strip_dy_from_alphatex_note_token(full_tok)
         raw_chunks.append((t0b, t1b, snap, full_tok, base_tok))
 
-    merged_rows: list[list[Any]] = []
-    for t0b, t1b, snap, full_tok, base_tok in raw_chunks:
-        if merged_rows and snap == merged_rows[-1][2] and abs(t0b - merged_rows[-1][1]) < 1e-5:
-            merged_rows[-1][1] = t1b
-        else:
-            merged_rows.append([t0b, t1b, snap, full_tok, base_tok])
+    merged_rows, merged_repeat_pairs = merge_redundant_sustain_segments(raw_chunks)
 
     first_note_in_row: list[bool] = [True]
 
-    def emit_units_slice(total_units: float, first_full: str, base_only: str) -> None:
+    def emit_units_slice(
+        total_units: float,
+        first_full: str,
+        base_only: str,
+        snapshot: tuple[tuple[int, int], ...],
+    ) -> None:
         nonlocal bar_idx, bar_tokens, bar_units
+        nonlocal emitted_token_count, emitted_32_count, emitted_repeat_snapshot, last_emitted_snapshot, emitted_rest_count
+        nonlocal bar_32_count, bar_token_count
         rem_u = float(total_units)
         guard = 0
         while rem_u > 1e-6:
@@ -1685,7 +3264,13 @@ def _midi_to_alphatex(
                 continue
             den_found: int | None = None
             nu = 0.0
-            for d in (1, 2, 4, 8, 16, 32):
+            base_den_cur = int(bar_render_profile.get(bar_idx, {}).get("base_den", float(base_den)))
+            den_order = (1, 2, 4, 8, 16, 32)
+            if base_den_cur == 8:
+                den_order = (1, 2, 4, 8, 16, 32)
+            elif base_den_cur == 4:
+                den_order = (1, 2, 4, 8, 16, 32)
+            for d in den_order:
                 nn = 16.0 / d
                 if nn <= rem_u + 1e-6 and nn <= room + 1e-6:
                     den_found = d
@@ -1702,15 +3287,33 @@ def _midi_to_alphatex(
                     else:
                         return
                     continue
+            global_32_ratio = (emitted_32_count * 100.0 / max(1, emitted_token_count)) if emitted_token_count else 0.0
+            bar_32_ratio = (bar_32_count * 100.0 / max(1, bar_token_count)) if bar_token_count else 0.0
+            if den_found == 32 and (global_32_ratio >= duration_32_ratio_target_pct or bar_32_ratio >= bar_32_ratio_limit_pct):
+                if rem_u >= 1.0 - 1e-6 and room >= 1.0 - 1e-6:
+                    den_found = 16
+                    nu = 1.0
             piece = first_full if first_note_in_row[0] else base_only
             first_note_in_row[0] = False
-            tok = f":{den_found} {piece}" if den_found != base_den else piece
+            tok = f":{den_found} {piece}" if den_found != base_den_cur else piece
             bar_tokens.append(tok)
+            bar_snapshots.append(snapshot)
+            emitted_token_count += 1
+            bar_token_count += 1
+            if den_found == 32:
+                emitted_32_count += 1
+                bar_32_count += 1
+            if _parse_token(tok)[1] == "r":
+                emitted_rest_count += 1
+            if snapshot and last_emitted_snapshot == snapshot:
+                emitted_repeat_snapshot += 1
+            if snapshot:
+                last_emitted_snapshot = snapshot
             bar_units += nu
             rem_u -= nu
 
     for row in merged_rows:
-        st, en, _snap, first_full, base_only = row[0], row[1], row[2], row[3], row[4]
+        st, en, snap, first_full, base_only = row[0], row[1], row[2], row[3], row[4]
         ct = float(st)
         first_note_in_row[0] = True
         while ct < float(en) - eps and bar_idx < len(bars_info):
@@ -1729,10 +3332,12 @@ def _midi_to_alphatex(
                 ct = chunk_end
                 continue
             units_chunk = chunk_sec / base_unit_sec
-            emit_units_slice(units_chunk, first_full, base_only)
+            emit_units_slice(units_chunk, first_full, base_only, snap)
             ct = chunk_end
 
     if bar_tokens:
+        flush_bar()
+    while bar_idx < len(bars_info):
         flush_bar()
 
     body = "\n".join(bars) if bars else f":{base_den} r |"
@@ -1775,10 +3380,109 @@ def _midi_to_alphatex(
         token_ok = bool(diag.get("tokenGuard", {}).get("ok", True))
         has_errors = bool(diag.get("hasErrors", False))
         if token_ok and not has_errors:
+            if render_stats_out is not None:
+                legacy_boundaries: set[float] = {0.0, last_bar_end}
+                for n in analysis_note_events:
+                    legacy_boundaries.add(float(n["start"]))
+                    legacy_boundaries.add(float(n["end"]))
+                for bs_l, be_l, *_ in bars_info:
+                    legacy_boundaries.add(float(bs_l))
+                    legacy_boundaries.add(float(be_l))
+                legacy_chunks = _build_chunks_from_boundaries(uniq_sorted(list(legacy_boundaries)))
+                legacy_rows, _legacy_merged_pairs = merge_redundant_sustain_segments(legacy_chunks)
+                before_tokens_raw, _before_repeats_raw = _estimate_counts_for_rows(legacy_rows)
+                before_tokens = max(1, int(before_tokens_raw))
+                r_ratio_after = (float(emitted_rest_count) * 100.0 / max(1.0, float(emitted_token_count)))
+                bar_density_p95_val = int(
+                    np.percentile(np.asarray(bar_token_densities, dtype=np.float64), 95)
+                ) if bar_token_densities else 0
+                bar_node_p95_val = int(
+                    np.percentile(np.asarray(bar_node_counts, dtype=np.float64), 95)
+                ) if bar_node_counts else 0
+                bar_attack_p95_val = int(
+                    np.percentile(np.asarray(bar_attack_counts, dtype=np.float64), 95)
+                ) if bar_attack_counts else 0
+                duration_fragmentation_score = float(
+                    np.mean(np.asarray(bar_duration_fragmentation_values, dtype=np.float64))
+                ) if bar_duration_fragmentation_values else 0.0
+                phrase_continuity_score = round(
+                    1.0 - min(1.0, (float(emitted_repeat_snapshot) / max(1.0, float(emitted_token_count))) * 0.45),
+                    4,
+                )
+                render_stats_out.clear()
+                _stats_payload: dict[str, Any] = {
+                        "render_strategy": "tempo_density_compact_with_meter_guard",
+                        "render_event_mode": "hybrid_attack_adaptive_hold",
+                        "attack_only_render": bool(ATTACK_ONLY_RENDER),
+                        "meter_integrity": {"success": int(meter_ok_count), "fail": int(meter_fail_count)},
+                        "token_counts": {
+                            "before": int(before_tokens),
+                            "after": int(emitted_token_count),
+                            "reduction_rate_pct": round((before_tokens - emitted_token_count) * 100.0 / before_tokens, 2),
+                        },
+                        "duration_32_ratio_after_pct": round(
+                            (emitted_32_count * 100.0 / max(1, emitted_token_count)), 2
+                        ),
+                        "duration_32_ratio_target": float(duration_32_ratio_target_pct),
+                        "duration_32_ratio_met": bool(
+                            (emitted_32_count * 100.0 / max(1, emitted_token_count))
+                            <= duration_32_ratio_target_pct
+                        ),
+                        "bar_density_p95": int(bar_density_p95_val),
+                        "bar_node_count_p95": int(bar_node_p95_val),
+                        "bar_attack_p95": int(bar_attack_p95_val),
+                        "r_gap_ratio_after_pct": round(float(r_ratio_after), 2),
+                        "duration_fragmentation_score": round(float(duration_fragmentation_score), 4),
+                        "phrase_continuity_score": float(phrase_continuity_score),
+                        "penalty_fret_jump_p95": round(
+                            max(0.0, float(np.percentile(np.asarray(play_jump_values, dtype=np.float64), 95)) - 7.0) * 0.08,
+                            6,
+                        )
+                        if play_jump_values
+                        else 0.0,
+                        "penalty_string_cross_rate": round(
+                            (float(play_string_cross) / max(1.0, float(play_total_pairs))) * 0.6,
+                            6,
+                        ),
+                        "penalty_attack_burst": round(
+                            max(
+                                0.0,
+                                float(
+                                    (
+                                        np.percentile(np.asarray(bar_token_densities, dtype=np.float64), 95)
+                                        if bar_token_densities
+                                        else 0.0
+                                    )
+                                    - float(bar_attack_max_count)
+                                ),
+                            )
+                            * 0.09,
+                            6,
+                        ),
+                        "voice_preservation_score": round(
+                            float(voice_preserved_count) / max(1.0, float(voice_reference_count)),
+                            4,
+                        ),
+                        "bar_32_cap_applied_count": int(bar_32_cap_applied_count),
+                        "bar_attack_cap_applied_count": int(bar_attack_cap_applied_count),
+                        "penalty_bar_overflow": round(float(bar_overflow_count) * 0.08, 6),
+                        "penalty_duration_fragmentation": round(max(0.0, float(duration_fragmentation_score) - 1.0) * 0.26, 6),
+                        "bar_attack_max_count": int(bar_attack_max_count),
+                        "voice_hold_profile": voice_hold_profile,
+                        "repeat_snapshot_counts": {
+                            # 한국어 주석: 동일 snapshot 인접 세그먼트는 merge 단계에서 제거율을 산정.
+                            "before": int(merged_repeat_pairs),
+                            "after": 0,
+                            "reduction_rate_pct": 100.0 if merged_repeat_pairs > 0 else 0.0,
+                            "merged_pairs": int(merged_repeat_pairs),
+                        },
+                        "validator_passed": True,
+                }
+                render_stats_out.update(_stats_payload)
             if tab_output_dir is not None and note_events:
                 try:
                     write_tab_compare_artifacts(
-                        midi_path, note_events, tab_output_dir, refine=False
+                        midi_path, analysis_note_events, tab_output_dir, refine=False
                     )
                 except OSError:
                     pass
@@ -1802,6 +3506,8 @@ def _midi_to_alphatex(
         attempt += 1
 
     assert last_diag is not None
+    if render_stats_out is not None:
+        render_stats_out["validator_passed"] = False
     errors = last_diag.get("errors", []) or []
     ast_issues = last_diag.get("astIssues", []) or []
     preview = errors[:3]
@@ -1827,7 +3533,6 @@ def _midi_to_score(
     lyrics: str | None = None,
     capo: int = 0,
     tempo_override: float | None = None,
-    onset_times_sec: list[float] | None = None,
 ) -> dict[str, Any]:
     midi = pretty_midi.PrettyMIDI(str(midi_path))
     tempo_segments = _parse_tempo_segments(midi)
@@ -1837,7 +3542,7 @@ def _midi_to_score(
     ts0 = ts_segments[0]
     num, den = int(ts0[1]), int(ts0[2])
 
-    beats, _grid_step_sec = _quantized_beats_from_midi(midi, tempo, onset_times_sec=onset_times_sec)
+    beats, _grid_step_sec = _quantized_beats_from_midi(midi, tempo)
 
     raw_notes = _raw_guitar_notes_from_midi(midi)
     max_end = max((n["end"] for n in raw_notes), default=0.0)
@@ -1893,6 +3598,8 @@ def run_four_step_pipeline(
     lyrics_cache_root = Path("data") / "lyrics_cache"
     lyrics: str | None = None
     lyrics_source: str = "none"
+    timed_lyrics: list[dict[str, Any]] = []
+    lyrics_timing_source: str = "none"
 
     base_name = _safe_job_name_from_title(title, url)
     job_dir = _allocate_job_dir(Path("data") / "jobs", base_name)
@@ -1901,7 +3608,7 @@ def run_four_step_pipeline(
     report(5, "download", "yt-dlp로 mp3 다운로드 시작")
     mp3_path = _download_mp3(url, job_dir / "audio")
     audio_dur = _probe_audio_duration_sec(mp3_path)
-    lyrics, lyrics_source = _resolve_youtube_lyrics(
+    lyrics, lyrics_source, timed_lyrics, lyrics_timing_source = _resolve_youtube_lyrics(
         str(url),
         job_dir,
         title,
@@ -1912,6 +3619,7 @@ def run_four_step_pipeline(
         audio_dur,
         lyrics_cache_root,
     )
+    timed_lyrics, lyrics_filter_stats = _filter_timed_lyrics_noise(timed_lyrics)
     if lyrics and lyrics.strip():
         report(10, "lyrics", f"가사 수집 완료 ({lyrics_source})")
     else:
@@ -1919,66 +3627,337 @@ def run_four_step_pipeline(
 
     capo_guess = _guess_capo_from_text(title, lyrics)
 
-    report(18, "beat", "풀 믹스에서 BPM·박 시각 추정(librosa)")
-    beat_meta = analyze_beats_from_mix_mp3(mp3_path)
-    detected_bpm: float | None = None
-    beat_times_out: list[float] = []
-    downbeat_indices_out: list[int] = []
-    if beat_meta.get("ok") and beat_meta.get("bpm") is not None:
-        detected_bpm = float(beat_meta["bpm"])
-        beat_times_out = list(beat_meta.get("beat_times_sec") or [])
-        downbeat_indices_out = list(beat_meta.get("downbeat_indices") or [])
-        report(20, "beat", f"BPM~{detected_bpm:.1f}, {len(beat_times_out)} beats")
-    else:
-        err = beat_meta.get("error") or "unknown"
-        report(20, "beat", f"박 추정 실패·MIDI 템포 사용 ({err})")
-
-    report(30, "separate", "Demucs로 stem 분리 시작")
+    report(25, "separate", "Demucs로 stem 분리 시작")
     stems = _separate_demucs(mp3_path, job_dir / "stems")
     guitar_audio = _ensure_flat_guitar_stem_mp3(stems, job_dir / "stems")
 
-    report(45, "onset", "기타 stem onset 추출(음 과다 표기 완화)")
-    onset_meta = analyze_onsets_from_guitar_audio(guitar_audio, bpm_hint=detected_bpm)
-    onset_times_out: list[float] = []
-    if onset_meta.get("ok"):
-        onset_times_out = list(onset_meta.get("onset_times_sec") or [])
-        report(50, "onset", f"onset {len(onset_times_out)}개 추출")
-    else:
-        report(50, "onset", f"onset 추출 실패·기본 후처리 사용 ({onset_meta.get('error') or 'unknown'})")
-
-    report(60, "basic-pitch", "Basic Pitch로 MIDI 변환 시작")
+    report(45, "basic-pitch", "Basic Pitch로 MIDI 변환 시작")
     midi_path = _basic_pitch_to_midi(guitar_audio, job_dir / "midi" / "guitar.mid")
+    original_midi_bytes = midi_path.read_bytes()
+    midi_pm_bpm = pretty_midi.PrettyMIDI(str(midi_path))
+    _ts_bpm = _parse_tempo_segments(midi_pm_bpm)
+    midi_bpm_meta = max(20.0, min(300.0, float(_ts_bpm[0][1]))) if _ts_bpm else 120.0
+    (job_dir / "tab").mkdir(parents=True, exist_ok=True)
+    candidate_root = job_dir / "tab" / "_candidates"
+    candidate_root.mkdir(parents=True, exist_ok=True)
+    midi_cleanup_stats: dict[str, Any] = {
+        "enabled": MIDI_CLEANUP_ENABLED,
+        "raw_midi_note_count": 0,
+        "cleaned_midi_note_count": 0,
+        "removed_short_note_count": 0,
+        "merged_duplicate_note_count": 0,
+    }
+    midi_cleanup_warning: str | None = None
 
-    if detected_bpm is not None:
+    snap_stats: dict[str, Any] = {"snapped_note_count": 0}
+    snap_warning: str | None = None
+    # MIDI_SNAP_ENABLED 시 오디오 박 대신 MIDI 템포+0초 앵커만 쓰려면 snap 헬퍼를 확장하면 된다.
+    report(70, "alphatex", "MIDI/AlphaTex 반복 재튜닝 시작")
+    retune_profiles: list[dict[str, Any]] = [
+        {
+            "iter": 1,
+            "cleanup_strength": 1,
+            "min_duration_sec": MIDI_CLEANUP_MIN_DURATION_SEC,
+            "dup_tol": MIDI_CLEANUP_DUPLICATE_START_TOLERANCE_SEC,
+            "velocity_ratio": MIDI_CLEANUP_VELOCITY_RELATIVE_RATIO,
+            "duration32_target": 25.0,
+            "bar32_limit": BAR_32_RATIO_LIMIT_PCT,
+            "bar_32_max_count": 4,
+            "bar_attack_max_count": 10,
+            "chord_first_simplify": CHORD_FIRST_SIMPLIFY,
+            "accompaniment_limit": 2,
+            "melody_ioi_floor_sec": 0.055,
+            "accompaniment_ioi_floor_sec": 0.105,
+        },
+        {
+            "iter": 2,
+            "cleanup_strength": 2,
+            "min_duration_sec": max(MIDI_CLEANUP_MIN_DURATION_SEC, 0.10),
+            "dup_tol": max(MIDI_CLEANUP_DUPLICATE_START_TOLERANCE_SEC, 0.09),
+            "velocity_ratio": max(MIDI_CLEANUP_VELOCITY_RELATIVE_RATIO, 0.47),
+            "duration32_target": 25.0,
+            "bar32_limit": 25.0,
+            "bar_32_max_count": 3,
+            "bar_attack_max_count": 8,
+            "chord_first_simplify": CHORD_FIRST_SIMPLIFY,
+            "accompaniment_limit": 2,
+            "melody_ioi_floor_sec": 0.065,
+            "accompaniment_ioi_floor_sec": 0.125,
+        },
+        {
+            "iter": 3,
+            "cleanup_strength": 3,
+            "min_duration_sec": max(MIDI_CLEANUP_MIN_DURATION_SEC, 0.12),
+            "dup_tol": max(MIDI_CLEANUP_DUPLICATE_START_TOLERANCE_SEC, 0.11),
+            "velocity_ratio": max(MIDI_CLEANUP_VELOCITY_RELATIVE_RATIO, 0.54),
+            "duration32_target": 22.0,
+            "bar32_limit": 22.0,
+            "bar_32_max_count": 2,
+            "bar_attack_max_count": 7,
+            "chord_first_simplify": True,
+            "accompaniment_limit": 1,
+            "melody_ioi_floor_sec": 0.075,
+            "accompaniment_ioi_floor_sec": 0.145,
+        },
+    ]
+    candidate_runs: list[dict[str, Any]] = []
+    selected_candidate: dict[str, Any] | None = None
+    for profile in retune_profiles:
+        iter_idx = int(profile["iter"])
+        midi_path.write_bytes(original_midi_bytes)
+        iter_snap_stats: dict[str, Any] = {"snapped_note_count": 0}
         try:
             midi_adjust = pretty_midi.PrettyMIDI(str(midi_path))
-            snap_midi_notes_to_sixteenth_grid(midi_adjust, detected_bpm, beat_times_out)
+            cleanup_stats = _cleanup_transcribed_midi(
+                midi_adjust,
+                min_duration_sec=float(profile["min_duration_sec"]),
+                duplicate_start_tolerance_sec=float(profile["dup_tol"]),
+                velocity_relative_ratio=float(profile["velocity_ratio"]),
+                cleanup_strength=int(profile["cleanup_strength"]),
+            )
             midi_adjust.write(str(midi_path))
         except Exception as exc:
-            report(65, "beat", f"MIDI 스냅 실패(템포만 반영): {exc}")
+            cleanup_stats = dict(midi_cleanup_stats)
+            cleanup_stats["iter_error"] = f"cleanup:{exc}"
+            midi_cleanup_warning = f"midi_cleanup_skipped:{exc}"
 
-    report(85, "alphatex", "MIDI를 AlphaTex 문법으로 변환 시작")
-    alphatex = _midi_to_alphatex(
-        midi_path,
-        title=score_title,
-        artist=display_artist,
-        lyrics=lyrics,
-        audio_duration_sec=audio_dur,
-        capo=capo_guess,
-        tempo_override=detected_bpm,
-        onset_times_sec=onset_times_out,
-        tab_output_dir=job_dir / "tab",
-    )
+        candidate_tab_dir = candidate_root / f"iter_{iter_idx}"
+        candidate_tab_dir.mkdir(parents=True, exist_ok=True)
+        render_stats_iter: dict[str, Any] = {}
+        try:
+            alphatex_iter = _midi_to_alphatex(
+                midi_path,
+                title=score_title,
+                artist=display_artist,
+                lyrics=lyrics,
+                audio_duration_sec=audio_dur,
+                capo=capo_guess,
+                tempo_override=None,
+                tab_output_dir=candidate_tab_dir,
+                render_stats_out=render_stats_iter,
+                duration_32_ratio_target_pct=float(profile["duration32_target"]),
+                bar_32_ratio_limit_pct=float(profile["bar32_limit"]),
+                bar_32_max_count=int(profile["bar_32_max_count"]),
+                bar_attack_max_count=int(profile["bar_attack_max_count"]),
+                chord_first_simplify=bool(profile["chord_first_simplify"]),
+                accompaniment_limit=int(profile["accompaniment_limit"]),
+                melody_ioi_floor_sec=float(profile["melody_ioi_floor_sec"]),
+                accompaniment_ioi_floor_sec=float(profile["accompaniment_ioi_floor_sec"]),
+            )
+        except Exception as exc:
+            render_stats_iter = {"validator_passed": False, "iter_error": f"alphatex:{exc}"}
+            alphatex_iter = ":16 r |"
+        compare_f1 = _read_compare_f1(candidate_tab_dir / "compare_report.json")
+        cleaned = float(cleanup_stats.get("cleaned_midi_note_count", 0.0))
+        raw = max(1.0, float(cleanup_stats.get("raw_midi_note_count", 0.0)))
+        cleaned_ratio = cleaned / raw
+        token_reduction = float(render_stats_iter.get("token_counts", {}).get("reduction_rate_pct", 0.0))
+        duration32 = float(render_stats_iter.get("duration_32_ratio_after_pct", 100.0))
+        bar_node_count_p95 = int(render_stats_iter.get("bar_node_count_p95", 999))
+        duration_fragmentation_score = float(render_stats_iter.get("duration_fragmentation_score", 999.0))
+        meter_fail = int(render_stats_iter.get("meter_integrity", {}).get("fail", 1))
+        validator_passed = bool(render_stats_iter.get("validator_passed", False))
+        kpi_met = (
+            cleaned_ratio <= 0.85
+            and duration32 <= 25.0
+            and token_reduction >= 35.0
+            and int(render_stats_iter.get("bar_density_p95", 999)) <= 12
+            and bar_node_count_p95 <= 12
+            and duration_fragmentation_score <= 1.8
+            and meter_fail == 0
+            and validator_passed
+        )
+        score_components = _score_candidate_components(render_stats_iter, cleaned_ratio, compare_f1)
+        candidate_score = float(score_components.get("total_score", 1e9))
+        candidate_runs.append(
+            {
+                "iter": iter_idx,
+                "profile": profile,
+                "cleanup_stats": cleanup_stats,
+                "snap_stats": iter_snap_stats,
+                "render_stats": render_stats_iter,
+                "alphatex": alphatex_iter,
+                "compare_f1_onset_symmetric": compare_f1,
+                "cleaned_ratio": round(cleaned_ratio, 4),
+                "token_reduction_rate_pct": round(token_reduction, 2),
+                "duration_32_ratio_after_pct": round(duration32, 2),
+                "meter_fail": meter_fail,
+                "validator_passed": validator_passed,
+                "kpi_met": kpi_met,
+                "score": candidate_score,
+                "score_components": score_components,
+                "bar_density_p95": int(render_stats_iter.get("bar_density_p95", 999)),
+                "bar_node_count_p95": int(bar_node_count_p95),
+                "duration_fragmentation_score": round(duration_fragmentation_score, 4),
+                "candidate_tab_dir": str(candidate_tab_dir),
+                "midi_bytes": midi_path.read_bytes(),
+            }
+        )
+        report(
+            71 + iter_idx,
+            "retune",
+            (
+                f"iter-{iter_idx}: cleaned/raw={cleaned_ratio:.3f}, token={token_reduction:.1f}%, "
+                f":32={duration32:.1f}%, node_p95={bar_node_count_p95}, frag={duration_fragmentation_score:.2f}, meter_fail={meter_fail}, f1={compare_f1:.3f}"
+            ),
+        )
+        must_iter3 = (
+            int(render_stats_iter.get("bar_density_p95", 0)) > 13
+            or float(render_stats_iter.get("token_counts", {}).get("after", 0.0)) > 1100.0
+        )
+        if kpi_met and iter_idx >= 2 and not must_iter3:
+            selected_candidate = candidate_runs[-1]
+            break
+        if iter_idx < 2:
+            continue
+        if iter_idx == 2 and must_iter3:
+            continue
+
+    similarity_guard_rejected_iters = 0
+    if selected_candidate is None and candidate_runs:
+        baseline_f1 = float(candidate_runs[0].get("compare_f1_onset_symmetric", 0.0))
+        eligible = [
+            c
+            for c in candidate_runs
+            if (baseline_f1 - float(c.get("compare_f1_onset_symmetric", 0.0))) <= 0.03
+        ]
+        similarity_guard_rejected_iters = max(0, len(candidate_runs) - len(eligible))
+        pool = eligible if eligible else candidate_runs
+        selected_candidate = min(
+            pool,
+            key=lambda x: (
+                float(x.get("score", 1e9)),
+                float(x.get("render_stats", {}).get("token_counts", {}).get("after", 1e9)),
+                float(x.get("bar_density_p95", 1e9)),
+                float(x.get("duration_fragmentation_score", 1e9)),
+                float(x.get("score_components", {}).get("playability_penalty_sum", 1e9)),
+            ),
+        )
+    if selected_candidate is None:
+        raise RuntimeError("재튜닝 후보를 생성하지 못했습니다.")
+
+    midi_path.write_bytes(selected_candidate["midi_bytes"])
+    midi_cleanup_stats = dict(selected_candidate["cleanup_stats"])
+    snap_stats = dict(selected_candidate["snap_stats"])
+    render_stats = dict(selected_candidate["render_stats"])
+    alphatex = str(selected_candidate["alphatex"])
+    fallback_applied = len(candidate_runs) > 1
+    selected_iter = int(selected_candidate["iter"])
+    kpi_unmet_reasons: list[str] = []
+    if not bool(selected_candidate.get("kpi_met", False)):
+        if float(selected_candidate.get("cleaned_ratio", 1.0)) > 0.85:
+            kpi_unmet_reasons.append("cleaned/raw 비율 미달")
+        if float(selected_candidate.get("duration_32_ratio_after_pct", 100.0)) > 25.0:
+            kpi_unmet_reasons.append(":32 비율 미달")
+        if float(selected_candidate.get("token_reduction_rate_pct", 0.0)) < 35.0:
+            kpi_unmet_reasons.append("토큰 감소율 미달")
+        if float(selected_candidate.get("bar_density_p95", 999.0)) > 12.0:
+            kpi_unmet_reasons.append("bar_density_p95 미달")
+        if float(selected_candidate.get("bar_node_count_p95", 999.0)) > 12.0:
+            kpi_unmet_reasons.append("bar_node_count_p95 미달")
+        if float(selected_candidate.get("duration_fragmentation_score", 999.0)) > 1.8:
+            kpi_unmet_reasons.append("duration_fragmentation_score 미달")
+        if int(selected_candidate.get("meter_fail", 1)) != 0:
+            kpi_unmet_reasons.append("meter fail 존재")
+        if not bool(selected_candidate.get("validator_passed", False)):
+            kpi_unmet_reasons.append("validator 실패")
+
+    selected_dir = Path(str(selected_candidate["candidate_tab_dir"]))
+    try:
+        for src_name, dest_name in (("compare_report.json", "compare_report.json"), ("tab_from_tab.mid", "tab_from_tab.mid")):
+            src = selected_dir / src_name
+            dest = job_dir / "tab" / dest_name
+            if src.exists():
+                shutil.copy2(src, dest)
+    except OSError:
+        pass
+
     score = _midi_to_score(
         midi_path,
         title=score_title,
         artist=display_artist,
         lyrics=lyrics,
         capo=capo_guess,
-        tempo_override=detected_bpm,
-        onset_times_sec=onset_times_out,
+        tempo_override=None,
     )
     (job_dir / "tab").mkdir(parents=True, exist_ok=True)
+    midi_for_lyrics = pretty_midi.PrettyMIDI(str(midi_path))
+    note_attack_times = sorted(
+        {
+            round(float(note.start), 3)
+            for inst in midi_for_lyrics.instruments
+            if not inst.is_drum
+            for note in inst.notes
+            if note.end > note.start
+        }
+    )
+    beat_anchors = sorted(set([0.0] + [float(t) for t in note_attack_times]))
+    aligned_timed_lyrics, lyrics_alignment_offset_sec, lyrics_alignment_score, lyrics_alignment_mode, lyrics_alignment_segments = _align_timed_lyrics_to_timeline(
+        timed_lyrics,
+        beat_anchors,
+        use_piecewise=True,
+    )
+    lyrics_timed_coverage_ratio = 0.0
+    if timed_lyrics:
+        lyrics_timed_coverage_ratio = float(len(aligned_timed_lyrics)) / max(1.0, float(len(timed_lyrics)))
+    elif aligned_timed_lyrics:
+        lyrics_timed_coverage_ratio = 1.0
+    if not lyrics and aligned_timed_lyrics:
+        lyrics = _timed_lyrics_to_plain(aligned_timed_lyrics)
+        if lyrics:
+            lyrics_source = "timed_lyrics_fallback"
+    if aligned_timed_lyrics:
+        (job_dir / "tab" / "lyrics_timed.json").write_text(
+            json.dumps(
+                {
+                    "source": lyrics_timing_source,
+                    "alignment_offset_sec": lyrics_alignment_offset_sec,
+                    "alignment_score": lyrics_alignment_score,
+                    "timed_coverage_ratio": lyrics_timed_coverage_ratio,
+                    "alignment_mode": lyrics_alignment_mode,
+                    "alignment_segments": lyrics_alignment_segments,
+                    "line_count": len(aligned_timed_lyrics),
+                    "items": aligned_timed_lyrics,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    if isinstance(score.get("meta"), dict):
+        score["meta"]["timedLyrics"] = [
+            {
+                "startSec": float(it.get("start_sec", 0.0)),
+                "endSec": float(it.get("end_sec", 0.0)),
+                "text": str(it.get("text", "")),
+            }
+            for it in aligned_timed_lyrics
+            if str(it.get("text", "")).strip()
+        ]
+        score["meta"]["lyricsAlignmentScore"] = float(lyrics_alignment_score)
+        score["meta"]["lyricsTimingSource"] = lyrics_timing_source
+    interleaved_meta: dict[str, Any] = {}
+    try:
+        alphatex, interleaved_meta = _apply_interleaved_lyrics_to_alphatex(
+            alphatex,
+            midi_path,
+            None,
+            aligned_timed_lyrics,
+            plain_lyrics_for_staff=(
+                lyrics.strip() if lyrics and str(lyrics).strip() else None
+            ),
+        )
+    except Exception as exc:
+        interleaved_meta = {
+            "applied": False,
+            "error": str(exc),
+            "skipped_reason": f"exception:{type(exc).__name__}",
+        }
+    lyrics_layout_for_files: str | None = (
+        "interleaved_comment"
+        if interleaved_meta.get("applied")
+        else ("header_lyrics" if (lyrics and lyrics.strip() and "\\lyrics" in alphatex) else "none")
+    )
     (job_dir / "tab" / "guitar.alphatex").write_text(alphatex, encoding="utf-8")
     (job_dir / "tab" / "score.json").write_text(json.dumps(score, ensure_ascii=False, indent=2), encoding="utf-8")
     meta_payload = {
@@ -1993,18 +3972,13 @@ def run_four_step_pipeline(
     (job_dir / "meta.json").write_text(json.dumps(meta_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     job_meta_payload = {
-        "bpm": detected_bpm,
-        "beat_times_sec": beat_times_out if detected_bpm is not None else [],
-        "downbeat_indices": downbeat_indices_out if detected_bpm is not None else [],
-        "beat_analysis_ok": bool(beat_meta.get("ok")),
-        "beat_analysis_raw": {k: v for k, v in beat_meta.items() if k != "error"},
-        "onset_analysis_ok": bool(onset_meta.get("ok")),
-        "onset_times_sec": onset_times_out,
+        "midi_bpm": float(midi_bpm_meta),
+        "tempo_source": "midi_file",
     }
-    if beat_meta.get("error"):
-        job_meta_payload["beat_analysis_error"] = beat_meta["error"]
-    if onset_meta.get("error"):
-        job_meta_payload["onset_analysis_error"] = onset_meta["error"]
+    if midi_cleanup_warning:
+        job_meta_payload["midi_cleanup_warning"] = midi_cleanup_warning
+    if snap_warning:
+        job_meta_payload["midi_snap_warning"] = snap_warning
     (job_dir / "job_meta.json").write_text(json.dumps(job_meta_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     lyrics_truncated, lyrics_alphatex_chars = (
         _alphatex_lyrics_truncation_info(lyrics.strip())
@@ -2017,6 +3991,7 @@ def run_four_step_pipeline(
         lyrics_source,
         alphatex_truncated=lyrics_truncated,
         alphatex_lyrics_chars=lyrics_alphatex_chars,
+        lyrics_layout=lyrics_layout_for_files,
     )
     midi_chk = pretty_midi.PrettyMIDI(str(midi_path))
     (job_dir / "tab" / "summary.json").write_text(
@@ -2027,6 +4002,20 @@ def run_four_step_pipeline(
                 "audio_duration_sec": audio_dur,
                 "capo_guess": capo_guess,
                 "lyrics_source": lyrics_source,
+                "lyrics_timing_source": lyrics_timing_source,
+                "lyrics_alignment_offset_sec": lyrics_alignment_offset_sec,
+                "lyrics_alignment_score": lyrics_alignment_score,
+                "lyrics_alignment_mode": lyrics_alignment_mode,
+                "lyrics_alignment_segments": lyrics_alignment_segments,
+                "lyrics_timed_path": str(job_dir / "tab" / "lyrics_timed.json"),
+                "lyrics_filtered_line_count": int(lyrics_filter_stats.get("after_line_count", 0)),
+                "lyrics_noise_removed_count": int(lyrics_filter_stats.get("removed_line_count", 0)),
+                "lyrics_quality_report": {
+                    "before_line_count": int(lyrics_filter_stats.get("before_line_count", 0)),
+                    "after_line_count": int(lyrics_filter_stats.get("after_line_count", 0)),
+                    "noise_removed_count": int(lyrics_filter_stats.get("removed_line_count", 0)),
+                    "alignment_score_after": float(lyrics_alignment_score),
+                },
                 "lyrics_files": lyrics_files_info,
                 "midi_has_named_chord_track_hint": _midi_has_named_chord_track_hint(midi_chk),
                 "midi_note_events_only": True,
@@ -2038,8 +4027,144 @@ def run_four_step_pipeline(
                 "tab_from_tab_midi": str(job_dir / "tab" / "tab_from_tab.mid"),
                 "tab_compare_report": str(job_dir / "tab" / "compare_report.json"),
                 "job_meta_path": str(job_dir / "job_meta.json"),
-                "audio_bpm": detected_bpm,
-                "beat_times_count": len(beat_times_out) if detected_bpm is not None else 0,
+                "midi_bpm": float(midi_bpm_meta),
+                "tempo_source": "midi_file",
+                "midi_cleanup_profile": {
+                    "enabled": bool(midi_cleanup_stats.get("enabled", MIDI_CLEANUP_ENABLED)),
+                    "min_duration_sec": float(
+                        midi_cleanup_stats.get("min_duration_sec", MIDI_CLEANUP_MIN_DURATION_SEC)
+                    ),
+                    "duplicate_start_tolerance_sec": float(
+                        midi_cleanup_stats.get(
+                            "duplicate_start_tolerance_sec", MIDI_CLEANUP_DUPLICATE_START_TOLERANCE_SEC
+                        )
+                    ),
+                    "velocity_floor": int(midi_cleanup_stats.get("velocity_floor", MIDI_CLEANUP_VELOCITY_FLOOR)),
+                    "velocity_relative_ratio": float(
+                        midi_cleanup_stats.get("velocity_relative_ratio", MIDI_CLEANUP_VELOCITY_RELATIVE_RATIO)
+                    ),
+                },
+                "raw_midi_note_count": int(midi_cleanup_stats.get("raw_midi_note_count", 0)),
+                "cleaned_midi_note_count": int(midi_cleanup_stats.get("cleaned_midi_note_count", 0)),
+                "removed_short_note_count": int(midi_cleanup_stats.get("removed_short_note_count", 0)),
+                "merged_duplicate_note_count": int(midi_cleanup_stats.get("merged_duplicate_note_count", 0)),
+                "midi_reduction_rate_pct": round(
+                    100.0
+                    * (
+                        1.0
+                        - (
+                            float(midi_cleanup_stats.get("cleaned_midi_note_count", 0))
+                            / max(1.0, float(midi_cleanup_stats.get("raw_midi_note_count", 0)))
+                        )
+                    ),
+                    2,
+                ),
+                "snap_profile": {
+                    "enabled": MIDI_SNAP_ENABLED,
+                    "max_snap_error_sec": MIDI_SNAP_MAX_ERROR_SEC,
+                    "snap_note_end": MIDI_SNAP_NOTE_END,
+                },
+                "snapped_note_count": int(snap_stats.get("snapped_note_count", 0)),
+                "duration_32_ratio_target": float(render_stats.get("duration_32_ratio_target", DURATION_32_RATIO_TARGET_PCT)),
+                "duration_32_ratio_met": bool(render_stats.get("duration_32_ratio_met", False)),
+                "bar_density_p95": int(render_stats.get("bar_density_p95", 0)),
+                "bar_node_count_p95": int(render_stats.get("bar_node_count_p95", 0)),
+                "bar_attack_p95": int(render_stats.get("bar_attack_p95", 0)),
+                "duration_fragmentation_score": float(render_stats.get("duration_fragmentation_score", 0.0)),
+                "r_gap_ratio_after_pct": float(render_stats.get("r_gap_ratio_after_pct", 0.0)),
+                "phrase_continuity_score": float(render_stats.get("phrase_continuity_score", 0.0)),
+                "bar_32_cap_applied_count": int(render_stats.get("bar_32_cap_applied_count", 0)),
+                "bar_attack_cap_applied_count": int(render_stats.get("bar_attack_cap_applied_count", 0)),
+                "voice_preservation_score": float(render_stats.get("voice_preservation_score", 0.0)),
+                "lyrics_timed_coverage_ratio": float(lyrics_timed_coverage_ratio),
+                "lyrics_layout": lyrics_layout_for_files,
+                "lyrics_interleaved_applied": bool(interleaved_meta.get("applied", False)),
+                "lyrics_staff_reinjected": bool(interleaved_meta.get("staff_lyrics_reinjected", False)),
+                "lyrics_interleaved_error": interleaved_meta.get("error"),
+                "lyrics_interleaved_skipped_reason": interleaved_meta.get("skipped_reason"),
+                "lyrics_interleaved_char_count": int(interleaved_meta.get("interleaved_char_count", 0)),
+                "lyrics_interleaved_validator_ok": interleaved_meta.get("validator_ok_after"),
+                "render_event_mode": str(render_stats.get("render_event_mode", "hybrid_attack_adaptive_hold")),
+                "fixed_den": render_stats.get("fixed_den"),
+                "slots_per_bar": render_stats.get("slots_per_bar"),
+                "slots_per_bar_by_bar_head": render_stats.get("slots_per_bar_by_bar_head"),
+                "voice_hold_profile": render_stats.get("voice_hold_profile", {}),
+                "kpi_fallback_applied": bool(fallback_applied),
+                "kpi_selected_iter": int(selected_iter),
+                "kpi_retune_candidates": [
+                    {
+                        "iter": int(c.get("iter", 0)),
+                        "cleaned_raw_ratio": float(c.get("cleaned_ratio", 1.0)),
+                        "token_reduction_rate_pct": float(c.get("token_reduction_rate_pct", 0.0)),
+                        "duration_32_ratio_after_pct": float(c.get("duration_32_ratio_after_pct", 100.0)),
+                        "meter_fail": int(c.get("meter_fail", 1)),
+                        "validator_passed": bool(c.get("validator_passed", False)),
+                        "f1_onset_symmetric": float(c.get("compare_f1_onset_symmetric", 0.0)),
+                        "bar_density_p95": float(c.get("bar_density_p95", 0.0)),
+                        "bar_node_count_p95": float(c.get("bar_node_count_p95", 0.0)),
+                        "duration_fragmentation_score": float(c.get("duration_fragmentation_score", 0.0)),
+                        "voice_preservation_score": float(c.get("render_stats", {}).get("voice_preservation_score", 0.0)),
+                        "phrase_continuity_score": float(c.get("render_stats", {}).get("phrase_continuity_score", 0.0)),
+                        "bar_attack_p95": float(c.get("render_stats", {}).get("bar_attack_p95", 0.0)),
+                        "r_gap_ratio_after_pct": float(c.get("render_stats", {}).get("r_gap_ratio_after_pct", 0.0)),
+                        "lyrics_alignment_score": float(lyrics_alignment_score),
+                        "lyrics_timed_coverage_ratio": float(lyrics_timed_coverage_ratio),
+                        "lyrics_noise_removed_count": int(lyrics_filter_stats.get("removed_line_count", 0)),
+                        "playability_penalty_sum": float(c.get("score_components", {}).get("playability_penalty_sum", 0.0)),
+                        "score": float(c.get("score", -999.0)),
+                        "score_components": c.get("score_components", {}),
+                        "kpi_met": bool(c.get("kpi_met", False)),
+                    }
+                    for c in candidate_runs
+                ],
+                "fallback_candidate_scores": [
+                    {
+                        "iter": int(c.get("iter", 0)),
+                        "score": float(c.get("score", 0.0)),
+                        "score_components": c.get("score_components", {}),
+                        "token_after": float(c.get("render_stats", {}).get("token_counts", {}).get("after", 0.0)),
+                        "bar_density_p95": float(c.get("bar_density_p95", 0.0)),
+                        "duration_fragmentation_score": float(c.get("duration_fragmentation_score", 0.0)),
+                    }
+                    for c in candidate_runs
+                ],
+                "selected_profile": {
+                    "iter": int(selected_candidate.get("iter", 0)),
+                    "score": float(selected_candidate.get("score", 0.0)),
+                    "profile": selected_candidate.get("profile", {}),
+                    "score_components": selected_candidate.get("score_components", {}),
+                    "selection_reason": "min_score_then_token_after_then_bar_density_then_duration_fragmentation_then_playability_with_f1_guard",
+                },
+                "kpi_selected_score": float(selected_candidate.get("score", -999.0)),
+                "similarity_guard_rejected_iters": int(similarity_guard_rejected_iters),
+                "kpi_unmet_reasons": kpi_unmet_reasons,
+                "tab_tuning_profile": {
+                    "max_notes_per_slot": MAX_NOTES_PER_SLOT,
+                    "onset_tolerance_sec": ONSET_TOLERANCE_SEC,
+                    "merge_min_ioi_sec": MERGE_MIN_IOI_SEC,
+                    "sustain_release_sec": SUSTAIN_RELEASE_SEC,
+                    "max_sustain_beats": MAX_SUSTAIN_BEATS,
+                    "grid_mode": "fixed_16th",
+                    "fingering_jump_penalty": {
+                        "string_move_coeff": 0.50,
+                        "jump_threshold_fret": 10,
+                        "jump_excess_coeff": 1.2,
+                    },
+                },
+                "chord_inference_profile": {
+                    "method": "midi_weighted_with_bass_key_ngram",
+                    "extra_penalty": CHORD_EXTRA_PENALTY,
+                    "min_score_ratio": CHORD_MIN_SCORE_RATIO,
+                    "bass_prior_scale": CHORD_BASS_PRIOR_SCALE,
+                    "key_context_bonus": CHORD_KEY_CONTEXT_BONUS,
+                    "ngram_root_jump_penalty": CHORD_NGRAM_ROOT_JUMP_PENALTY,
+                    "ngram_quality_switch_penalty": CHORD_NGRAM_QUALITY_SWITCH_PENALTY,
+                    "short_note_ratio": CHORD_SHORT_NOTE_RATIO,
+                    "short_note_weight": CHORD_SHORT_NOTE_WEIGHT,
+                },
+                # 한국어 주석: 새 렌더 전략/토큰 압축 통계를 summary 메타에 노출.
+                "render_strategy": render_stats.get("render_strategy", "onset_centric_with_meter_guard"),
+                "token_reduction_stats": render_stats,
             },
             ensure_ascii=False,
             indent=2,

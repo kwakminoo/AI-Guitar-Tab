@@ -7,7 +7,6 @@ soundfile>=0.12.1
 numpy>=1.26.0
 pydantic==2.9.0
 python-multipart>=0.0.9
-librosa>=0.10.2
 musicpy>=7.11
 basic-pitch[onnx]>=0.4.0
 onnxruntime>=1.17.0
