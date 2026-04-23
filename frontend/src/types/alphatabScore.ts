@@ -31,6 +31,8 @@ export type AlphaTabScore = {
     timeSignature: { numerator: number; denominator: number };
     key: string;
     capo: number;
+    capoMethod?: string;
+    capoCandidateRange?: [number, number];
     chords?: string[];
   };
   tracks: AlphaTabTrack[];

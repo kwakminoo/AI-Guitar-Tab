@@ -18,7 +18,11 @@ from typing import Any, Callable
 
 import pretty_midi
 
-from .beat_audio import analyze_onsets_from_guitar_audio, snap_midi_notes_to_sixteenth_grid
+from .beat_audio import (
+    analyze_onsets_from_guitar_audio,
+    snap_midi_notes_to_sixteenth_grid,
+    snap_midi_notes_to_tempo_grid,
+)
 from .lyrics_lrclib import fetch_lyrics_from_lrclib, parse_artist_and_track_from_youtube_title
 from .omnizart_guitar import extract_guitar_tab_hints_from_midi
 from .tab_playback import refine_note_events_with_reference_midi, write_tab_compare_artifacts
@@ -32,6 +36,73 @@ MERGE_MIN_IOI_SEC = 0.070
 SUSTAIN_RELEASE_SEC = 0.090
 MAX_SUSTAIN_BEATS = 2.0
 MAX_NOTES_PER_SLOT = 3
+
+# 운지 전이 비용 보정 계수(_position_transition_cost와 독립 조정)
+TAB_V2_SAME_FRET_BONUS = 0.4
+TAB_V2_SHORT_NOTE_SEC = 0.08
+TAB_V2_SHORT_NOTE_PENALTY = 0.15
+TAB_V2_LOW_VEL_THRESH = 36
+TAB_V2_LOW_VEL_PENALTY = 0.12
+TAB_V2_STRING_CHANGE_EXTRA = 0.25
+TAB_RENDER_MODE_DEFAULT = "transcription"
+TAB_RENDER_MODE_ALLOWED = {"transcription", "arrangement"}
+TAB_ARRANGEMENT_MIN_RECALL_DEFAULT = 0.80
+CAPO_CANDIDATE_RANGE = (0, 5)
+HYBRID_PITCH_ERROR_WEIGHT = 0.82
+HYBRID_RIFF_PITCH_ERROR_WEIGHT = 0.95
+HYBRID_CHORD_TONE_BONUS = 0.45
+HYBRID_RIFF_CHORD_TONE_BONUS = 0.18
+HYBRID_SHAPE_ALIGNMENT_BONUS = 0.40
+HYBRID_RIFF_SHAPE_ALIGNMENT_BONUS = 0.10
+HYBRID_SHAPE_OUTSIDE_PENALTY = 0.55
+HYBRID_RIFF_SHAPE_OUTSIDE_PENALTY = 0.18
+RIFF_CHORD_HIT_RATE_THRESHOLD = 0.42
+RIFF_NOTES_PER_SEC_THRESHOLD = 5.8
+RIFF_MEAN_MELODIC_STEP_THRESHOLD = 2.8
+
+
+@dataclass(frozen=True)
+class TabRenderPreset:
+    name: str
+    unified_grid: bool
+    subdivisions_per_quarter: int
+    use_grid_boundaries: bool
+    use_emit_cost: bool
+    use_emit_mdp: bool
+    use_fingering_v2: bool
+    use_merge_voice_key: bool
+    onset_gate_mode: str
+    emit_dynamics: bool
+    base_den: int
+
+
+TRANSCRIPTION_PRESET = TabRenderPreset(
+    name="transcription",
+    unified_grid=False,
+    subdivisions_per_quarter=4,
+    use_grid_boundaries=False,
+    use_emit_cost=False,
+    use_emit_mdp=False,
+    use_fingering_v2=False,
+    use_merge_voice_key=False,
+    onset_gate_mode="hard",
+    emit_dynamics=False,
+    base_den=16,
+)
+
+ARRANGEMENT_PRESET = TabRenderPreset(
+    name="arrangement",
+    unified_grid=True,
+    subdivisions_per_quarter=2,  # 8분 해상도
+    use_grid_boundaries=True,
+    use_emit_cost=True,
+    use_emit_mdp=True,
+    use_fingering_v2=True,
+    use_merge_voice_key=True,
+    onset_gate_mode="soft",
+    emit_dynamics=False,
+    base_den=8,
+)
 
 # General MIDI program → alphaTab instrument 이름 (Structural Metadata 문서와 동일 계열)
 _GM_PROGRAM_TO_ALPHATAB: dict[int, str] = {
@@ -419,22 +490,8 @@ def _merge_chord_into_beat_token(token: str, ch_label: str) -> str:
     return f"{token} {{{ch_prop}}}"
 
 
-def _guess_capo_from_text(*texts: str | None) -> int:
-    """제목/설명에서 capo(0~12) 추정. 없으면 0."""
-    blob = " ".join(t for t in texts if t)
-    for pat in (
-        r"(?i)capo\s*[:=]?\s*(\d{1,2})",
-        r"(?i)카포\s*(\d{1,2})",
-        r"(?i)(\d{1,2})\s*카포",
-        r"(?i)캡\s*o\s*(\d{1,2})",
-        r"(?i)(\d{1,2})\s*fret",
-    ):
-        m = re.search(pat, blob)
-        if m:
-            v = int(m.group(1))
-            if 0 <= v <= 12:
-                return v
-    return 0
+def _clamp_capo_0_5(value: int | float) -> int:
+    return max(0, min(5, int(value)))
 
 
 def _chord_label_notation_simplicity(label: str | None) -> float:
@@ -462,34 +519,57 @@ def _capo_style_prior(capo: int) -> float:
 def _refine_capo_with_midi(
     raw_notes: list[dict[str, Any]],
     bars_info: list[tuple[float, float, int, int, float, int]],
-    text_capo: int,
 ) -> int:
     """
-    제목/가사에 카포가 없을 때, 마디별 코드 표기 단순도로 카포 후보(0~12) 선택.
-    텍스트에서 이미 유효한 카포가 있으면 그대로 둔다.
+    MIDI 기반 마디별 코드 표기 단순도로 카포 후보(0~5) 선택.
     """
-    tc = max(0, min(12, int(text_capo)))
-    if tc > 0:
-        return tc
+    return _choose_capo_midi_only(raw_notes, bars_info, render_mode="transcription")
+
+
+def _choose_capo_midi_only(
+    raw_notes: list[dict[str, Any]],
+    bars_info: list[tuple[float, float, int, int, float, int]],
+    *,
+    render_mode: str,
+) -> int:
+    """MIDI only 카포 선택(0~5 고정) — 모드별로 연주성 가중치만 다르게 반영."""
     if not bars_info:
         return 0
-    candidates = (0, 2, 3, 4, 5, 7, 9)
+    candidates = tuple(range(CAPO_CANDIDATE_RANGE[0], CAPO_CANDIDATE_RANGE[1] + 1))
     best_c = 0
     best_score = -1e9
     for c in candidates:
         labels = _bar_chord_labels(raw_notes, bars_info, c)
-        sim = sum(_chord_label_notation_simplicity(lbl) for lbl in labels)
-        total = sim + _capo_style_prior(c)
+        simp = statistics.fmean(_chord_label_notation_simplicity(lb) for lb in labels) if labels else 0.0
+        play = _arrangement_playability_score(raw_notes, c)
+        if render_mode == "arrangement":
+            total = (1.00 * simp) + (1.00 * play) + _capo_style_prior(c)
+        else:
+            total = (1.12 * simp) + (0.60 * play) + _capo_style_prior(c)
         if total > best_score + 1e-9:
             best_score = total
             best_c = c
-    return best_c
+    return _clamp_capo_0_5(best_c)
 
 
-def _alphatex_emit_dynamics() -> bool:
-    """기본은 끔(정답지 스타일). ALPHATEX_INCLUDE_DY=1 이면 velocity→{dy} 유지."""
-    v = (os.environ.get("ALPHATEX_INCLUDE_DY") or "").strip().lower()
-    return v in ("1", "true", "yes", "on")
+def _resolve_tab_render_mode() -> str:
+    raw = (os.environ.get("TAB_RENDER_MODE") or TAB_RENDER_MODE_DEFAULT).strip().lower()
+    if raw in TAB_RENDER_MODE_ALLOWED:
+        return raw
+    return TAB_RENDER_MODE_DEFAULT
+
+
+def _parse_arrangement_min_recall() -> float:
+    raw = (os.environ.get("TAB_ARRANGEMENT_MIN_RECALL") or "").strip()
+    if not raw:
+        return TAB_ARRANGEMENT_MIN_RECALL_DEFAULT
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except ValueError:
+        return TAB_ARRANGEMENT_MIN_RECALL_DEFAULT
+
+def _preset_for_mode(mode: str) -> TabRenderPreset:
+    return ARRANGEMENT_PRESET if mode == "arrangement" else TRANSCRIPTION_PRESET
 
 
 def _raw_guitar_notes_from_midi(midi: pretty_midi.PrettyMIDI) -> list[dict[str, Any]]:
@@ -599,6 +679,41 @@ def _bar_chord_labels(
     return out
 
 
+def _smooth_bar_chord_labels(labels: list[str]) -> list[str]:
+    """인접 마디에서 단발 점프를 완화해 코드 진행을 안정화."""
+    if len(labels) < 3:
+        return labels
+    out = list(labels)
+    for i in range(1, len(out) - 1):
+        prev_label = out[i - 1]
+        cur_label = out[i]
+        next_label = out[i + 1]
+        if cur_label != prev_label and cur_label != next_label and prev_label == next_label:
+            out[i] = prev_label
+    return out
+
+
+def _arrangement_playability_score(raw_notes: list[dict[str, Any]], capo: int) -> float:
+    """카포 후보별 단순 연주성 점수(높을수록 좋음)."""
+    if not raw_notes:
+        return 0.0
+    adjusted = [max(0, int(n["pitch"]) - int(capo) - 40) for n in raw_notes]
+    mean_fret = statistics.fmean(adjusted) if adjusted else 0.0
+    openish = sum(1 for f in adjusted if f <= 3) / max(1, len(adjusted))
+    move = sum(abs(adjusted[i] - adjusted[i - 1]) for i in range(1, len(adjusted))) / max(
+        1, len(adjusted) - 1
+    )
+    return (1.6 * openish) - (0.025 * mean_fret) - (0.018 * move)
+
+
+def _refine_capo_for_arrangement(
+    raw_notes: list[dict[str, Any]],
+    bars_info: list[tuple[float, float, int, int, float, int]],
+) -> int:
+    """MIDI 기반 단순성/연주성 결합 카포 선택(0~5 full search)."""
+    return _choose_capo_midi_only(raw_notes, bars_info, render_mode="arrangement")
+
+
 # AlphaTex \\chord ("이름" s1..s6): 1번줄(하이E) → 6번줄(로우E), x = 뮤트
 _CHORD_ALPHA_TEX_SHAPES: dict[str, tuple[Any, ...]] = {
     "C": (0, 1, 0, 2, 3, "x"),
@@ -664,6 +779,227 @@ def _chord_shape_tuple_for_label(label: str) -> tuple[Any, ...] | None:
     return None
 
 
+def _chord_pitch_classes_from_label(label: str | None) -> set[int]:
+    s = _normalize_chord_label_for_shape_lookup(label or "")
+    if not s:
+        return set()
+    m = re.match(r"^([A-G])([#b]?)(.*)$", s)
+    if not m:
+        return set()
+    root_name = f"{m.group(1)}{m.group(2)}"
+    suffix = (m.group(3) or "").strip().lower()
+    root_map = {
+        "C": 0,
+        "C#": 1,
+        "D": 2,
+        "D#": 3,
+        "E": 4,
+        "F": 5,
+        "F#": 6,
+        "G": 7,
+        "G#": 8,
+        "A": 9,
+        "A#": 10,
+        "B": 11,
+    }
+    root_pc = root_map.get(root_name)
+    if root_pc is None:
+        return set()
+    quality = ""
+    if suffix.startswith("m7b5"):
+        quality = "m7b5"
+    elif suffix.startswith("maj7"):
+        quality = "maj7"
+    elif suffix.startswith("m7"):
+        quality = "m7"
+    elif suffix.startswith("dim"):
+        quality = "dim"
+    elif suffix.startswith("sus4"):
+        quality = "sus4"
+    elif suffix.startswith("sus2"):
+        quality = "sus2"
+    elif suffix.startswith("add9"):
+        quality = "add9"
+    elif suffix.startswith("7"):
+        quality = "7"
+    elif suffix.startswith("m"):
+        quality = "m"
+    intervals_map = {k: set(v) for k, v in _CHORD_CANDIDATES}
+    intervals = intervals_map.get(quality, {0, 4, 7})
+    return {(root_pc + i) % 12 for i in intervals}
+
+
+def _bar_index_for_time(
+    t: float,
+    bars_info: list[tuple[float, float, int, int, float, int]],
+    cache_idx: int,
+) -> int:
+    if not bars_info:
+        return 0
+    i = max(0, min(cache_idx, len(bars_info) - 1))
+    while i + 1 < len(bars_info) and t >= float(bars_info[i][1]) - 1e-9:
+        i += 1
+    while i > 0 and t < float(bars_info[i][0]) - 1e-9:
+        i -= 1
+    return i
+
+
+def _shape_fret_for_string(shape: tuple[Any, ...], string_no: int) -> int | None:
+    idx = int(string_no) - 1
+    if idx < 0 or idx >= len(shape):
+        return None
+    v = shape[idx]
+    if v == "x" or v == "X":
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _mapping_position_score(
+    *,
+    pitch: int,
+    pos: tuple[int, int],
+    prev_pos: tuple[int, int],
+    bar_label: str | None,
+    chord_pcs: set[int],
+    shape: tuple[Any, ...] | None,
+    capo: int,
+    use_v2: bool,
+    prev_meta: dict[str, Any] | None,
+    note_meta: dict[str, Any] | None,
+    weight_profile: dict[str, float] | None = None,
+) -> tuple[float, dict[str, float]]:
+    string_no, fret = int(pos[0]), int(pos[1])
+    sounding_pitch = int(GUITAR_OPEN_MIDI[string_no - 1] + fret + int(capo))
+    pitch_error = abs(int(pitch) - sounding_pitch)
+    profile = weight_profile or {}
+    pitch_weight = float(profile.get("pitch_error_weight", HYBRID_PITCH_ERROR_WEIGHT))
+    chord_bonus_value = float(profile.get("chord_tone_bonus", HYBRID_CHORD_TONE_BONUS))
+    shape_align_near = float(profile.get("shape_align_near_bonus", HYBRID_SHAPE_ALIGNMENT_BONUS))
+    shape_align_mid = float(profile.get("shape_align_mid_bonus", HYBRID_SHAPE_ALIGNMENT_BONUS * 0.30))
+    shape_out_muted = float(profile.get("shape_out_muted_penalty", HYBRID_SHAPE_OUTSIDE_PENALTY))
+    shape_out_far = float(profile.get("shape_out_far_penalty", HYBRID_SHAPE_OUTSIDE_PENALTY * 0.65))
+    shape_missing = float(profile.get("shape_missing_penalty", HYBRID_SHAPE_OUTSIDE_PENALTY * 0.15))
+    chord_tone_bonus = chord_bonus_value if chord_pcs and (sounding_pitch % 12) in chord_pcs else 0.0
+
+    shape_alignment_bonus = 0.0
+    shape_out_penalty = 0.0
+    if shape is not None:
+        sf = _shape_fret_for_string(shape, string_no)
+        if sf is None:
+            shape_out_penalty += shape_out_muted
+        else:
+            d = abs(int(fret) - int(sf))
+            if d <= 1:
+                shape_alignment_bonus += shape_align_near
+            elif d <= 3:
+                shape_alignment_bonus += shape_align_mid
+            elif d >= 6:
+                shape_out_penalty += shape_out_far
+    elif bar_label and bar_label != "?":
+        shape_out_penalty += shape_missing
+
+    if use_v2:
+        transition_cost = _position_transition_cost_v2(prev_pos, pos, prev_meta, note_meta)
+    else:
+        transition_cost = _position_transition_cost(prev_pos, pos)
+
+    total_cost = (
+        transition_cost
+        + (pitch_weight * float(pitch_error))
+        + float(shape_out_penalty)
+        - float(chord_tone_bonus)
+        - float(shape_alignment_bonus)
+    )
+    details = {
+        "pitch_error": float(pitch_error),
+        "chord_tone_hit": 1.0 if chord_tone_bonus > 0 else 0.0,
+        "shape_alignment_hit": 1.0 if shape_alignment_bonus > 0 else 0.0,
+    }
+    return float(total_cost), details
+
+
+def _hybrid_weight_profile(*, is_riff_segment: bool) -> dict[str, float]:
+    if is_riff_segment:
+        return {
+            "pitch_error_weight": HYBRID_RIFF_PITCH_ERROR_WEIGHT,
+            "chord_tone_bonus": HYBRID_RIFF_CHORD_TONE_BONUS,
+            "shape_align_near_bonus": HYBRID_RIFF_SHAPE_ALIGNMENT_BONUS,
+            "shape_align_mid_bonus": HYBRID_RIFF_SHAPE_ALIGNMENT_BONUS * 0.35,
+            "shape_out_muted_penalty": HYBRID_RIFF_SHAPE_OUTSIDE_PENALTY,
+            "shape_out_far_penalty": HYBRID_RIFF_SHAPE_OUTSIDE_PENALTY * 0.70,
+            "shape_missing_penalty": HYBRID_RIFF_SHAPE_OUTSIDE_PENALTY * 0.45,
+        }
+    return {
+        "pitch_error_weight": HYBRID_PITCH_ERROR_WEIGHT,
+        "chord_tone_bonus": HYBRID_CHORD_TONE_BONUS,
+        "shape_align_near_bonus": HYBRID_SHAPE_ALIGNMENT_BONUS,
+        "shape_align_mid_bonus": HYBRID_SHAPE_ALIGNMENT_BONUS * 0.30,
+        "shape_out_muted_penalty": HYBRID_SHAPE_OUTSIDE_PENALTY,
+        "shape_out_far_penalty": HYBRID_SHAPE_OUTSIDE_PENALTY * 0.65,
+        "shape_missing_penalty": HYBRID_SHAPE_OUTSIDE_PENALTY * 0.15,
+    }
+
+
+def _detect_riff_bars(
+    slots: dict[int, list[dict[str, Any]]],
+    slot_keys: list[int],
+    step: float,
+    bars_info: list[tuple[float, float, int, int, float, int]],
+    bar_chords: list[str],
+) -> set[int]:
+    if not slot_keys or not bars_info:
+        return set()
+    stats: dict[int, dict[str, Any]] = {}
+    prev_pitch_by_bar: dict[int, int] = {}
+    bar_idx_cache = 0
+    for k in slot_keys:
+        t = float(k * step)
+        bar_idx_cache = _bar_index_for_time(t, bars_info, bar_idx_cache)
+        bar_label = bar_chords[bar_idx_cache] if bar_idx_cache < len(bar_chords) else None
+        chord_pcs = _chord_pitch_classes_from_label(bar_label)
+        row = stats.setdefault(
+            bar_idx_cache,
+            {"notes": 0, "hits": 0, "step_sum": 0.0, "step_n": 0},
+        )
+        notes = slots.get(k, [])
+        if not notes:
+            continue
+        lead = max(notes, key=lambda x: (x.get("velocity", 0), -x.get("pitch", 0)))
+        lead_pitch = int(lead["pitch"])
+        prev_pitch = prev_pitch_by_bar.get(bar_idx_cache)
+        if prev_pitch is not None:
+            row["step_sum"] += abs(float(lead_pitch - prev_pitch))
+            row["step_n"] += 1
+        prev_pitch_by_bar[bar_idx_cache] = lead_pitch
+        for n in notes:
+            pitch = int(n["pitch"])
+            row["notes"] += 1
+            if chord_pcs and (pitch % 12) in chord_pcs:
+                row["hits"] += 1
+
+    riff_bars: set[int] = set()
+    for bar_idx, row in stats.items():
+        notes_n = max(1, int(row["notes"]))
+        hit_rate = float(row["hits"]) / float(notes_n)
+        bs, be, *_ = bars_info[bar_idx]
+        duration = max(1e-6, float(be) - float(bs))
+        note_density = float(notes_n) / duration
+        melodic_step = (
+            float(row["step_sum"]) / float(row["step_n"])
+            if int(row["step_n"]) > 0
+            else 0.0
+        )
+        if hit_rate <= RIFF_CHORD_HIT_RATE_THRESHOLD and (
+            note_density >= RIFF_NOTES_PER_SEC_THRESHOLD
+            or melodic_step >= RIFF_MEAN_MELODIC_STEP_THRESHOLD
+        ):
+            riff_bars.add(int(bar_idx))
+    return riff_bars
+
+
 def _alphatex_chord_definitions_block(ordered_labels: list[str]) -> str:
     lines: list[str] = []
     for name in ordered_labels:
@@ -697,31 +1033,103 @@ def _tab_snapshot_key(
     return tuple((int(n["string"]), int(n["fret"])) for n in chosen)
 
 
+def _tab_voice_uid_frozen(note_events: list[dict[str, Any]], t0: float, eps: float) -> frozenset[int]:
+    """활성 줄별 대표 노트의 note_uid 집합."""
+    active = [n for n in note_events if n["start"] <= t0 + eps and n["end"] > t0 + eps]
+    if not active:
+        return frozenset()
+    by_string: dict[int, dict[str, Any]] = {}
+    for n in active:
+        s = int(n["string"])
+        existing = by_string.get(s)
+        if existing is None:
+            by_string[s] = n
+            continue
+        if (n["velocity"], -n["fret"]) > (existing["velocity"], -existing["fret"]):
+            by_string[s] = n
+    chosen = sorted(by_string.values(), key=lambda x: (x["string"], x["fret"]))
+    uids: list[int] = []
+    for n in chosen:
+        if "note_uid" in n:
+            uids.append(int(n["note_uid"]))
+    return frozenset(uids)
+
+
+def _tab_merge_row_key(
+    note_events: list[dict[str, Any]],
+    t0: float,
+    eps: float,
+    *,
+    use_voice: bool,
+) -> Any:
+    snap = _tab_snapshot_key(note_events, t0, eps)
+    if not use_voice:
+        return snap
+    return (snap, _tab_voice_uid_frozen(note_events, t0, eps))
+
+
+_DEN_TO_HALF_UNITS = {32: 1, 16: 2, 8: 4, 4: 8, 2: 16, 1: 32}
+
+
+def _emit_pick_den_cost(
+    rem_u: float,
+    room: float,
+    bar_units: float,
+    last_den: int | None,
+) -> tuple[int | None, float]:
+    """유효 분모 중 비용 최소 선택. 불가 시 (None, 0)."""
+    best_cost = 1e18
+    best: tuple[int | None, float] = (None, 0.0)
+    token_w = 0.35
+    streak32_w = 0.22
+    align_bonus = -0.06
+    for d in (1, 2, 4, 8, 16, 32):
+        nu = 16.0 / d
+        if nu > rem_u + 1e-6 or nu > room + 1e-6:
+            continue
+        c = token_w
+        if d == 32 and last_den == 32:
+            c += streak32_w
+        pos_after = bar_units + nu
+        if abs(pos_after % 4.0) < 1e-4 or abs((pos_after % 4.0) - 4.0) < 1e-4:
+            c += align_bonus
+        if c < best_cost:
+            best_cost = c
+            best = (d, nu)
+    if best[0] is None:
+        return None, 0.0
+    return best
+
+
+def _mdp_den_sequence_half_units(target_half: int) -> list[int] | None:
+    """rem_u를 0.5·16분 단위(=32분) 정수로 본 최소 토큰 수 분해. 실패 시 None."""
+    if target_half <= 0:
+        return []
+    inf = 10**9
+    dp = [inf] * (target_half + 1)
+    back_den = [-1] * (target_half + 1)
+    dp[0] = 0
+    for h in range(1, target_half + 1):
+        for den, sz in ((32, 1), (16, 2), (8, 4), (4, 8), (2, 16), (1, 32)):
+            if h >= sz and dp[h - sz] + 1 < dp[h]:
+                dp[h] = dp[h - sz] + 1
+                back_den[h] = den
+    if dp[target_half] >= inf:
+        return None
+    out: list[int] = []
+    h = target_half
+    while h > 0:
+        den = back_den[h]
+        if den < 0:
+            return None
+        sz = _DEN_TO_HALF_UNITS[den]
+        out.append(den)
+        h -= sz
+    return list(reversed(out))
+
+
 def _strip_dy_from_alphatex_note_token(s: str) -> str:
     return re.sub(r"\s+\{dy\s+[^}]+\}\s*$", "", s).strip()
-
-
-def _greedy_decompose_duration_units(units: float) -> list[int]:
-    """16분음표 단위 길이를 :1..:32 토큰 분모 리스트로 분해한다."""
-    dens_order = [1, 2, 4, 8, 16, 32]
-    rem = float(units)
-    out: list[int] = []
-    eps = 1e-3
-    guard = 0
-    while rem > eps and guard < 20000:
-        guard += 1
-        placed = False
-        for den in dens_order:
-            u = 16.0 / den
-            if rem + 1e-6 >= u:
-                out.append(den)
-                rem -= u
-                placed = True
-                break
-        if not placed:
-            out.append(32)
-            rem -= 0.5
-    return out
 
 
 def _compute_bars_info(
@@ -1294,6 +1702,31 @@ def _position_transition_cost(prev: tuple[int, int], nxt: tuple[int, int]) -> fl
     return float(cost)
 
 
+def _position_transition_cost_v2(
+    prev: tuple[int, int],
+    nxt: tuple[int, int],
+    prev_meta: dict[str, Any] | None,
+    nxt_meta: dict[str, Any] | None,
+) -> float:
+    """기본 전이 비용 + 동일 운지·길이·velocity·스트링 변경."""
+    base = _position_transition_cost(prev, nxt)
+    if not prev_meta or not nxt_meta:
+        return base
+    ps, pf = prev
+    ns, nf = nxt
+    if ps == ns and pf == nf:
+        base -= TAB_V2_SAME_FRET_BONUS
+    dur = float(nxt_meta.get("end", 0.0)) - float(nxt_meta.get("start", 0.0))
+    if dur < TAB_V2_SHORT_NOTE_SEC:
+        base += TAB_V2_SHORT_NOTE_PENALTY
+    vel = int(nxt_meta.get("velocity", 64))
+    if vel < TAB_V2_LOW_VEL_THRESH:
+        base += TAB_V2_LOW_VEL_PENALTY
+    if ps != ns:
+        base += TAB_V2_STRING_CHANGE_EXTRA
+    return float(base)
+
+
 def _nearest_onset_distance_sec(onset_times: list[float], t: float) -> float:
     if not onset_times:
         return float("inf")
@@ -1320,22 +1753,43 @@ def _reduce_note_density_with_onsets(
     *,
     onset_times_sec: list[float] | None,
     quarter_sec: float,
+    onset_gate_mode: str,
+    stats_out: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     if not raw_notes:
         return raw_notes
 
     onset_times = sorted(float(t) for t in (onset_times_sec or []) if t is not None)
+    mode = onset_gate_mode if onset_gate_mode in ("hard", "soft", "off") else "hard"
+    hard_drop = 0
+    soft_adj = 0
+    if stats_out is not None:
+        stats_out["onset_gate_mode"] = mode
 
-    # 3-A: onset 근접 노트 우선 유지
-    if onset_times:
+    # 3-A: onset 근접 노트 우선 유지 (hard: 기존 드롭, soft: velocity 감쇠, off: 스킵)
+    if onset_times and mode != "off":
         gated: list[dict[str, Any]] = []
         for n in raw_notes:
             d = _nearest_onset_distance_sec(onset_times, float(n["start"]))
-            # onset에서 멀고 velocity가 약한 노트는 잔향/환상음으로 간주해 제거
-            if d <= ONSET_TOLERANCE_SEC or int(n["velocity"]) >= (MIN_NOTE_VELOCITY + 8):
+            vel = int(n["velocity"])
+            if d <= ONSET_TOLERANCE_SEC or vel >= (MIN_NOTE_VELOCITY + 8):
                 gated.append(n)
+                continue
+            if mode == "hard":
+                hard_drop += 1
+                continue
+            # soft
+            nv = max(MIN_NOTE_VELOCITY, int(round(vel * 0.62)))
+            if nv != vel:
+                soft_adj += 1
+            nn = {**n, "velocity": nv}
+            gated.append(nn)
         if gated:
             raw_notes = gated
+
+    if stats_out is not None:
+        stats_out["onset_hard_dropped_notes"] = int(hard_drop)
+        stats_out["onset_soft_velocity_adjusted"] = int(soft_adj)
 
     # 3-B: 동일 pitch의 과도한 촘촘 onset 병합
     min_ioi = max(MERGE_MIN_IOI_SEC, quarter_sec / 8.0)  # 대략 1/32 하한
@@ -1353,6 +1807,10 @@ def _reduce_note_density_with_onsets(
             if gap <= min_ioi:
                 cur["end"] = max(float(cur["end"]), float(nxt["end"]))
                 cur["velocity"] = max(int(cur["velocity"]), int(nxt["velocity"]))
+                if "note_uid" in cur or "note_uid" in nxt:
+                    u1 = int(cur.get("note_uid", 10**9))
+                    u2 = int(nxt.get("note_uid", 10**9))
+                    cur["note_uid"] = min(u1, u2)
             else:
                 merged.append(cur)
                 cur = dict(nxt)
@@ -1370,14 +1828,15 @@ def _reduce_note_density_with_onsets(
         new_end = min(end, cap1, cap2)
         if new_end <= start + 1e-3:
             continue
-        clamped.append(
-            {
-                "pitch": int(n["pitch"]),
-                "velocity": int(n["velocity"]),
-                "start": start,
-                "end": new_end,
-            }
-        )
+        row = {
+            "pitch": int(n["pitch"]),
+            "velocity": int(n["velocity"]),
+            "start": start,
+            "end": new_end,
+        }
+        if "note_uid" in n:
+            row["note_uid"] = int(n["note_uid"])
+        clamped.append(row)
     return clamped if clamped else raw_notes
 
 
@@ -1385,12 +1844,18 @@ def _quantized_beats_from_midi(
     midi: pretty_midi.PrettyMIDI,
     tempo: float,
     *,
+    preset: TabRenderPreset,
     onset_times_sec: list[float] | None = None,
     tab_hints: list[dict[str, Any]] | None = None,
+    onset_stats_out: dict[str, Any] | None = None,
+    bars_info: list[tuple[float, float, int, int, float, int]] | None = None,
+    bar_chords: list[str] | None = None,
+    capo: int = 0,
+    chord_metrics_out: dict[str, Any] | None = None,
+    max_notes_per_slot: int = MAX_NOTES_PER_SLOT,
 ) -> tuple[list[dict[str, Any]], float]:
     """
-    MIDI note start/end를 1/16 단위로 기본 양자화하고,
-    필요할 경우 1/32 단위까지 적응적으로 사용한다.
+    MIDI note start/end를 기본 양자화하고 모드 preset에 따라 격자 해상도를 적용한다.
     """
 
     quarter = 60.0 / max(1.0, tempo)
@@ -1403,6 +1868,7 @@ def _quantized_beats_from_midi(
         melodic_instruments = [inst for inst in midi.instruments if inst.notes]
 
     candidate_raw_notes: list[dict[str, Any]] = []
+    uid_next = 0
     for inst in melodic_instruments:
         for note in inst.notes:
             if note.end <= note.start:
@@ -1413,17 +1879,21 @@ def _quantized_beats_from_midi(
                 continue
             candidate_raw_notes.append(
                 {
+                    "note_uid": uid_next,
                     "pitch": int(note.pitch),
                     "velocity": int(note.velocity),
                     "start": float(note.start),
                     "end": float(note.end),
                 }
             )
+            uid_next += 1
 
     candidate_raw_notes = _reduce_note_density_with_onsets(
         candidate_raw_notes,
         onset_times_sec=onset_times_sec,
         quarter_sec=quarter,
+        onset_gate_mode=preset.onset_gate_mode,
+        stats_out=onset_stats_out,
     )
 
     _enrich_raw_notes_with_tab_hints(candidate_raw_notes, tab_hints)
@@ -1446,16 +1916,19 @@ def _quantized_beats_from_midi(
         snapped = round(note_time / step) * step
         return abs(note_time - snapped)
 
-    start_err_16 = [snap_error(n["start"], step_16) for n in candidate_raw_notes]
-    end_err_16 = [snap_error(n["end"], step_16) for n in candidate_raw_notes]
-    start_err_32 = [snap_error(n["start"], step_32) for n in candidate_raw_notes]
-    end_err_32 = [snap_error(n["end"], step_32) for n in candidate_raw_notes]
+    if preset.unified_grid:
+        step = quarter / float(max(1, preset.subdivisions_per_quarter))
+    else:
+        start_err_16 = [snap_error(n["start"], step_16) for n in candidate_raw_notes]
+        end_err_16 = [snap_error(n["end"], step_16) for n in candidate_raw_notes]
+        start_err_32 = [snap_error(n["start"], step_32) for n in candidate_raw_notes]
+        end_err_32 = [snap_error(n["end"], step_32) for n in candidate_raw_notes]
 
-    median_err_16 = statistics.median(start_err_16 + end_err_16)
-    median_err_32 = statistics.median(start_err_32 + end_err_32)
-    any_32_needed = any((n["end"] - n["start"]) <= step_16 * 0.75 for n in candidate_raw_notes)
+        median_err_16 = statistics.median(start_err_16 + end_err_16)
+        median_err_32 = statistics.median(start_err_32 + end_err_32)
+        any_32_needed = any((n["end"] - n["start"]) <= step_16 * 0.75 for n in candidate_raw_notes)
 
-    step = step_32 if any_32_needed and median_err_32 <= median_err_16 * 0.6 else step_16
+        step = step_32 if any_32_needed and median_err_32 <= median_err_16 * 0.6 else step_16
 
     # slot -> raw note list (여기서 아직 string/fret은 DP 후에 결정)
     slots: dict[int, list[dict[str, Any]]] = {}
@@ -1471,6 +1944,8 @@ def _quantized_beats_from_midi(
             "start": float(start),
             "end": float(end),
         }
+        if "note_uid" in n:
+            slot_note["note_uid"] = int(n["note_uid"])
         if "string" in n and "fret" in n:
             slot_note["string"] = int(n["string"])
             slot_note["fret"] = int(n["fret"])
@@ -1515,24 +1990,77 @@ def _quantized_beats_from_midi(
     back: dict[int, dict[tuple[int, int], tuple[int, int] | None]] = {}
     prev_slot_keys = slot_keys[0:1]
     first_k = prev_slot_keys[0]
+    use_v2 = preset.use_fingering_v2
+    bars_local = bars_info or []
+    bar_labels_local = bar_chords or []
+    bar_riff_segments = _detect_riff_bars(slots, slot_keys, step, bars_local, bar_labels_local)
+    slot_ctx: dict[int, tuple[str | None, set[int], tuple[Any, ...] | None, dict[str, float]]] = {}
+    bar_idx_cache = 0
+    for k in slot_keys:
+        time_value = float(k * step)
+        if bars_local:
+            bar_idx_cache = _bar_index_for_time(time_value, bars_local, bar_idx_cache)
+            bar_label = (
+                bar_labels_local[bar_idx_cache]
+                if bar_idx_cache < len(bar_labels_local)
+                else None
+            )
+            is_riff = bar_idx_cache in bar_riff_segments
+        else:
+            bar_label = None
+            is_riff = False
+        chord_pcs = _chord_pitch_classes_from_label(bar_label)
+        shape = _chord_shape_tuple_for_label(bar_label or "")
+        slot_ctx[k] = (bar_label, chord_pcs, shape, _hybrid_weight_profile(is_riff_segment=is_riff))
+
     for pos in lead_candidates[first_k]:
-        dp[pos] = 0.0
+        bar_label_0, chord_pcs_0, shape_0, profile_0 = slot_ctx[first_k]
+        seed_cost, _ = _mapping_position_score(
+            pitch=int(slot_leads[first_k]["pitch"]),
+            pos=pos,
+            prev_pos=pos,
+            bar_label=bar_label_0,
+            chord_pcs=chord_pcs_0,
+            shape=shape_0,
+            capo=capo,
+            use_v2=use_v2,
+            prev_meta=slot_leads[first_k],
+            note_meta=slot_leads[first_k],
+            weight_profile=profile_0,
+        )
+        dp[pos] = seed_cost
         back.setdefault(first_k, {})[pos] = None
-    for k in slot_keys[1:]:
+    for i, k in enumerate(slot_keys[1:], start=1):
+        prev_k = slot_keys[i - 1]
+        prev_meta = slot_leads[prev_k]
+        next_meta = slot_leads[k]
         new_dp: dict[tuple[int, int], float] = {}
         back.setdefault(k, {})
+        bar_label_k, chord_pcs_k, shape_k, profile_k = slot_ctx[k]
         for pos in lead_candidates[k]:
             best_cost = float("inf")
             best_prev_pos: tuple[int, int] | None = None
             for prev_pos, prev_cost in dp.items():
-                cost = prev_cost + _position_transition_cost(prev_pos, pos)
+                score_cost, _detail = _mapping_position_score(
+                    pitch=int(slot_leads[k]["pitch"]),
+                    pos=pos,
+                    prev_pos=prev_pos,
+                    bar_label=bar_label_k,
+                    chord_pcs=chord_pcs_k,
+                    shape=shape_k,
+                    capo=capo,
+                    use_v2=use_v2,
+                    prev_meta=prev_meta,
+                    note_meta=next_meta,
+                    weight_profile=profile_k,
+                )
+                cost = prev_cost + score_cost
                 if cost < best_cost:
                     best_cost = cost
                     best_prev_pos = prev_pos
             new_dp[pos] = best_cost
             back[k][pos] = best_prev_pos
         dp = new_dp
-        prev_k = k
 
     last_k = slot_keys[-1]
     best_last_pos = min(dp.keys(), key=lambda p: dp[p])
@@ -1547,58 +2075,110 @@ def _quantized_beats_from_midi(
         best_lead_pos[k] = prev_pos if prev_pos is not None else lead_candidates[k][0]
         cur_pos = best_lead_pos[k]
 
-    # slot 별 note mapping (lead은 DP 결과, 나머지는 직전 lead pos를 기준으로 그리디)
+    # slot 별 note mapping (lead은 DP 결과, 나머지는 코드/운지 비용 + 전이비용 결합)
     beats: list[dict[str, Any]] = []
     first_slot_time = slot_keys[0] * step
     if first_slot_time > 0:
         beats.append({"time": 0.0, "chord": None, "lyric": None, "notes": []})
+
+    capo_clamped = _clamp_capo_0_5(capo)
+    bar_idx_cache = 0
+    chord_hits = 0
+    shape_hits = 0
+    mapped_total = 0
+    riff_slot_count = 0
 
     prev_lead_pos: tuple[int, int] = best_lead_pos[slot_keys[0]]
     for k in slot_keys:
         time_value = float(k * step)
         notes = slots[k]
         mapped_notes: list[dict[str, Any]] = []
+        bar_label, chord_pcs, shape, weight_profile = slot_ctx[k]
+        if bars_local:
+            bar_idx_cache = _bar_index_for_time(time_value, bars_local, bar_idx_cache)
+            if bar_idx_cache in bar_riff_segments:
+                riff_slot_count += 1
         lead_note = slot_leads[k]
         for n in notes:
             if n is lead_note:
                 string_no, fret = best_lead_pos[k]
-                mapped_notes.append(
-                    {
-                        "string": int(string_no),
-                        "fret": int(fret),
-                        "start": float(n["start"]),
-                        "end": float(n["end"]),
-                        "velocity": int(n["velocity"]),
-                    }
-                )
-                continue
-
-            if "string" in n and "fret" in n:
-                mapped_notes.append(
-                    {
-                        "string": int(n["string"]),
-                        "fret": int(n["fret"]),
-                        "start": float(n["start"]),
-                        "end": float(n["end"]),
-                        "velocity": int(n["velocity"]),
-                    }
-                )
-                continue
-
-            candidates = _midi_pitch_to_candidate_positions(n["pitch"])
-            if not candidates:
-                candidates = [_midi_note_to_string_fret(n["pitch"])]
-            best_pos = min(candidates, key=lambda pos: _position_transition_cost(prev_lead_pos, pos))
-            string_no, fret = best_pos
-            mapped_notes.append(
-                {
+                row_m = {
                     "string": int(string_no),
                     "fret": int(fret),
                     "start": float(n["start"]),
                     "end": float(n["end"]),
                     "velocity": int(n["velocity"]),
                 }
-            )
+                if "note_uid" in n:
+                    row_m["note_uid"] = int(n["note_uid"])
+                mapped_notes.append(row_m)
+                mapped_total += 1
+                if chord_pcs and ((GUITAR_OPEN_MIDI[string_no - 1] + fret + capo_clamped) % 12) in chord_pcs:
+                    chord_hits += 1
+                if shape is not None:
+                    sf = _shape_fret_for_string(shape, string_no)
+                    if sf is not None and abs(int(fret) - int(sf)) <= 1:
+                        shape_hits += 1
+                continue
+
+            if "string" in n and "fret" in n:
+                row_m = {
+                    "string": int(n["string"]),
+                    "fret": int(n["fret"]),
+                    "start": float(n["start"]),
+                    "end": float(n["end"]),
+                    "velocity": int(n["velocity"]),
+                }
+                if "note_uid" in n:
+                    row_m["note_uid"] = int(n["note_uid"])
+                mapped_notes.append(row_m)
+                mapped_total += 1
+                if chord_pcs and ((GUITAR_OPEN_MIDI[int(n["string"]) - 1] + int(n["fret"]) + capo_clamped) % 12) in chord_pcs:
+                    chord_hits += 1
+                if shape is not None:
+                    sf = _shape_fret_for_string(shape, int(n["string"]))
+                    if sf is not None and abs(int(n["fret"]) - int(sf)) <= 1:
+                        shape_hits += 1
+                continue
+
+            candidates = _midi_pitch_to_candidate_positions(n["pitch"])
+            if not candidates:
+                candidates = [_midi_note_to_string_fret(n["pitch"])]
+            best_pos = candidates[0]
+            best_cost = float("inf")
+            best_detail = {"pitch_error": 0.0, "chord_tone_hit": 0.0, "shape_alignment_hit": 0.0}
+            for pos in candidates:
+                score_cost, detail = _mapping_position_score(
+                    pitch=int(n["pitch"]),
+                    pos=pos,
+                    prev_pos=prev_lead_pos,
+                    bar_label=bar_label,
+                    chord_pcs=chord_pcs,
+                    shape=shape,
+                    capo=capo_clamped,
+                    use_v2=use_v2,
+                    prev_meta=lead_note,
+                    note_meta=n,
+                    weight_profile=weight_profile,
+                )
+                if score_cost < best_cost:
+                    best_cost = score_cost
+                    best_pos = pos
+                    best_detail = detail
+            string_no, fret = best_pos
+            row_m = {
+                "string": int(string_no),
+                "fret": int(fret),
+                "start": float(n["start"]),
+                "end": float(n["end"]),
+                "velocity": int(n["velocity"]),
+            }
+            if "note_uid" in n:
+                row_m["note_uid"] = int(n["note_uid"])
+            mapped_notes.append(row_m)
+            mapped_total += 1
+            chord_hits += int(best_detail.get("chord_tone_hit", 0.0) > 0.5)
+            shape_hits += int(best_detail.get("shape_alignment_hit", 0.0) > 0.5)
 
         # 같은 slot에서 중복 줄 제거 + 최대 음수 제한
         by_string: dict[int, dict[str, Any]] = {}
@@ -1611,7 +2191,7 @@ def _quantized_beats_from_midi(
                 by_string[mn["string"]] = mn
 
         normalized_notes = sorted(by_string.values(), key=lambda x: (x["string"], x["fret"]))[
-            :MAX_NOTES_PER_SLOT
+            : max(1, int(max_notes_per_slot))
         ]
         beats.append(
             {
@@ -1623,6 +2203,17 @@ def _quantized_beats_from_midi(
         )
 
         prev_lead_pos = best_lead_pos[k]
+
+    if chord_metrics_out is not None:
+        denom = max(1, int(mapped_total))
+        chord_metrics_out.clear()
+        chord_metrics_out.update(
+            {
+                "chord_tone_hit_rate": round(float(chord_hits) / float(denom), 4),
+                "shape_alignment_rate": round(float(shape_hits) / float(denom), 4),
+                "riff_segment_ratio": round(float(riff_slot_count) / float(max(1, len(slot_keys))), 4),
+            }
+        )
 
     return beats, step
 
@@ -1638,9 +2229,13 @@ def _midi_to_alphatex(
     tempo_override: float | None = None,
     onset_times_sec: list[float] | None = None,
     tab_output_dir: Path | None = None,
+    tab_experiment_out: dict[str, Any] | None = None,
+    preset: TabRenderPreset = TRANSCRIPTION_PRESET,
+    arrangement_relax_level: int = 0,
 ) -> str:
     tab_hints = extract_guitar_tab_hints_from_midi(midi_path)
     midi = pretty_midi.PrettyMIDI(str(midi_path))
+    capo = _clamp_capo_0_5(capo)
     tempo_segments = _parse_tempo_segments(midi)
     ts_segments = _parse_time_signature_segments(midi)
     tempo0 = float(tempo_override) if tempo_override is not None else float(tempo_segments[0][1])
@@ -1653,9 +2248,28 @@ def _midi_to_alphatex(
         lyrics_line = f"\\lyrics \"{_escape_alpha_tex_lyrics(lyrics.strip())}\"\n"
 
     inst_name = _midi_program_to_alphatab_instrument(_get_primary_midi_program(midi))
+    raw_notes = _raw_guitar_notes_from_midi(midi)
+    max_raw = max([n["end"] for n in raw_notes], default=0.0)
+    max_end = max(max_raw, 0.01)
+    bars_info = _compute_bars_info(midi, max_end, bpm_override=tempo_override)
+    bar_chords = _bar_chord_labels(raw_notes, bars_info, int(capo))
+    if preset.name == "arrangement":
+        bar_chords = _smooth_bar_chord_labels(bar_chords)
 
+    onset_stats: dict[str, Any] = {}
+    chord_mapping_metrics: dict[str, Any] = {}
     beats, _grid_step_sec = _quantized_beats_from_midi(
-        midi, tempo0, onset_times_sec=onset_times_sec, tab_hints=tab_hints
+        midi,
+        tempo0,
+        preset=preset,
+        onset_times_sec=onset_times_sec,
+        tab_hints=tab_hints,
+        onset_stats_out=onset_stats,
+        bars_info=bars_info,
+        bar_chords=bar_chords,
+        capo=capo,
+        chord_metrics_out=chord_mapping_metrics,
+        max_notes_per_slot=MAX_NOTES_PER_SLOT + max(0, int(arrangement_relax_level)),
     )
     beats = sorted(beats, key=lambda b: float(b.get("time", 0.0)))
 
@@ -1668,33 +2282,26 @@ def _midi_to_alphatex(
                 continue
             if n.get("start") is None or n.get("end") is None:
                 continue
-            note_events.append(
-                {
-                    "string": int(n["string"]),
-                    "fret": int(n["fret"]),
-                    "start": float(n["start"]),
-                    "end": float(n["end"]),
-                    "velocity": int(n.get("velocity", 64)),
-                }
-            )
+            ev: dict[str, Any] = {
+                "string": int(n["string"]),
+                "fret": int(n["fret"]),
+                "start": float(n["start"]),
+                "end": float(n["end"]),
+                "velocity": int(n.get("velocity", 64)),
+            }
+            if "note_uid" in n:
+                ev["note_uid"] = int(n["note_uid"])
+            note_events.append(ev)
 
     if note_events:
         note_events, _ref_passes = refine_note_events_with_reference_midi(
             note_events, midi_path, max_passes=2
         )
 
-    base_den = 16
+    base_den = preset.base_den
     eps = 1e-6
 
     ts_pairs: list[tuple[float, tuple[int, int]]] = [(t, (n, d)) for t, n, d in ts_segments]
-    raw_notes = _raw_guitar_notes_from_midi(midi)
-    max_q = max([n["end"] for n in note_events], default=0.0)
-    max_raw = max([n["end"] for n in raw_notes], default=0.0)
-    max_end = max(max_q, max_raw, 0.01)
-
-    # 가변 마디 길이(박자표·템포) 타임라인
-    bars_info = _compute_bars_info(midi, max_end, bpm_override=tempo_override)
-    bar_chords = _bar_chord_labels(raw_notes, bars_info, int(capo))
     chord_order_unique: list[str] = []
     _seen_ch: set[str] = set()
     for _lbl in bar_chords:
@@ -1704,7 +2311,7 @@ def _midi_to_alphatex(
     chord_def_block = _alphatex_chord_definitions_block(chord_order_unique)
     capo_line = f"\\capo {int(capo)}\n" if int(capo) > 0 else ""
 
-    emit_dy = _alphatex_emit_dynamics()
+    emit_dy = preset.emit_dynamics
 
     def uniq_sorted(values: list[float]) -> list[float]:
         values_sorted = sorted(values)
@@ -1760,14 +2367,36 @@ def _midi_to_alphatex(
     printed_bpm: float = first_bpm
 
     last_bar_end = bars_info[-1][1] if bars_info else 0.0
-    boundaries: set[float] = {0.0, last_bar_end}
+    subdiv_snap = preset.subdivisions_per_quarter if preset.unified_grid else 4
+    quarter_sec_snap = 60.0 / max(20.0, min(300.0, first_bpm))
+    step_snap = quarter_sec_snap / float(max(1, subdiv_snap))
+
+    def _snap_time_to_grid(t: float) -> float:
+        return round(float(t) / step_snap) * step_snap
+
+    boundaries_legacy: set[float] = {0.0, last_bar_end}
     for n in note_events:
-        boundaries.add(float(n["start"]))
-        boundaries.add(float(n["end"]))
+        boundaries_legacy.add(float(n["start"]))
+        boundaries_legacy.add(float(n["end"]))
+    for bs, be, *_r in bars_info:
+        boundaries_legacy.add(bs)
+        boundaries_legacy.add(be)
+    boundary_count_before = len(uniq_sorted(list(boundaries_legacy)))
+
+    boundaries: set[float] = {0.0, last_bar_end}
     for bs, be, *_r in bars_info:
         boundaries.add(bs)
         boundaries.add(be)
+    if preset.use_grid_boundaries:
+        for n in note_events:
+            boundaries.add(round(_snap_time_to_grid(float(n["start"])), 6))
+            boundaries.add(round(_snap_time_to_grid(float(n["end"])), 6))
+    else:
+        for n in note_events:
+            boundaries.add(float(n["start"]))
+            boundaries.add(float(n["end"]))
     sorted_boundaries = uniq_sorted(list(boundaries))
+    boundary_count_after = len(sorted_boundaries)
 
     bar_idx = 0
     bar_tokens: list[str] = []
@@ -1830,17 +2459,22 @@ def _midi_to_alphatex(
         base_tok = _strip_dy_from_alphatex_note_token(full_tok)
         raw_chunks.append((t0b, t1b, snap, full_tok, base_tok))
 
+    use_voice_merge = preset.use_merge_voice_key
     merged_rows: list[list[Any]] = []
     for t0b, t1b, snap, full_tok, base_tok in raw_chunks:
-        if merged_rows and snap == merged_rows[-1][2] and abs(t0b - merged_rows[-1][1]) < 1e-5:
+        mkey = _tab_merge_row_key(note_events, t0b, eps, use_voice=use_voice_merge)
+        if merged_rows and mkey == merged_rows[-1][5] and abs(t0b - merged_rows[-1][1]) < 1e-5:
             merged_rows[-1][1] = t1b
         else:
-            merged_rows.append([t0b, t1b, snap, full_tok, base_tok])
+            merged_rows.append([t0b, t1b, snap, full_tok, base_tok, mkey])
 
     first_note_in_row: list[bool] = [True]
+    last_emit_den: list[int | None] = [None]
 
     def emit_units_slice(total_units: float, first_full: str, base_only: str) -> None:
         nonlocal bar_idx, bar_tokens, bar_units
+        use_cost = preset.use_emit_cost
+        use_mdp = preset.use_emit_mdp
         rem_u = float(total_units)
         guard = 0
         while rem_u > 1e-6:
@@ -1855,14 +2489,33 @@ def _midi_to_alphatex(
                 else:
                     bar_idx += 1
                 continue
+            if use_mdp and rem_u <= 12.0 and room + 1e-6 >= rem_u:
+                half = int(round(rem_u * 2))
+                if half > 0 and abs(half / 2.0 - rem_u) < 0.02:
+                    seq = _mdp_den_sequence_half_units(half)
+                    sum_h = sum(_DEN_TO_HALF_UNITS[d] for d in seq) if seq else -1
+                    if seq and sum_h == half:
+                        for den_found in seq:
+                            nu = 16.0 / den_found
+                            piece = first_full if first_note_in_row[0] else base_only
+                            first_note_in_row[0] = False
+                            tok = f":{den_found} {piece}" if den_found != base_den else piece
+                            bar_tokens.append(tok)
+                            bar_units += nu
+                            last_emit_den[0] = den_found
+                        rem_u = 0.0
+                        continue
             den_found: int | None = None
             nu = 0.0
-            for d in (1, 2, 4, 8, 16, 32):
-                nn = 16.0 / d
-                if nn <= rem_u + 1e-6 and nn <= room + 1e-6:
-                    den_found = d
-                    nu = nn
-                    break
+            if use_cost:
+                den_found, nu = _emit_pick_den_cost(rem_u, room, float(bar_units), last_emit_den[0])
+            else:
+                for d in (1, 2, 4, 8, 16, 32):
+                    nn = 16.0 / d
+                    if nn <= rem_u + 1e-6 and nn <= room + 1e-6:
+                        den_found = d
+                        nu = nn
+                        break
             if den_found is None:
                 den_found = 32
                 nu = 0.5
@@ -1880,6 +2533,7 @@ def _midi_to_alphatex(
             bar_tokens.append(tok)
             bar_units += nu
             rem_u -= nu
+            last_emit_den[0] = den_found
 
     for row in merged_rows:
         st, en, _snap, first_full, base_only = row[0], row[1], row[2], row[3], row[4]
@@ -1934,7 +2588,6 @@ def _midi_to_alphatex(
         + capo_line
         + f"\\ts ({first_ts[0]} {first_ts[1]})\n"
         "\\tuning (E4 B3 G3 D3 A2 E2)\n"
-        + capo_line
         + f"\\tempo {int(round(first_bpm))}\n"
     )
 
@@ -1955,6 +2608,30 @@ def _midi_to_alphatex(
                     )
                 except OSError:
                     pass
+            if tab_experiment_out is not None:
+                tok_counts: list[int] = []
+                for line in bars:
+                    pipe = line.find("|")
+                    core = line if pipe < 0 else line[:pipe]
+                    parts = [p for p in core.split() if p and not p.startswith("\\")]
+                    tok_counts.append(len(parts))
+                mean_tok = float(statistics.mean(tok_counts)) if tok_counts else 0.0
+                tab_experiment_out.clear()
+                tab_experiment_out.update(
+                    {
+                        "alphatex_rhythm_mode": (
+                            "arrangement_eighth" if preset.name == "arrangement" else "transcription_legacy"
+                        ),
+                        "render_mode": preset.name,
+                        "arrangement_relax_level": int(arrangement_relax_level),
+                        "boundary_count_before": int(boundary_count_before),
+                        "boundary_count_after": int(boundary_count_after),
+                        "mean_tokens_per_bar": round(mean_tok, 4),
+                        "grid_step_sec": round(float(_grid_step_sec), 8),
+                    }
+                )
+                tab_experiment_out.update(onset_stats)
+                tab_experiment_out.update(chord_mapping_metrics)
             return tex
 
         if attempt == 0 and _should_retry_after_alphatex_diagnostics(diag):
@@ -1969,7 +2646,6 @@ def _midi_to_alphatex(
                 + capo_line
                 + f"\\ts ({first_ts[0]} {first_ts[1]})\n"
                 "\\tuning (E4 B3 G3 D3 A2 E2)\n"
-                + capo_line
                 + f"\\tempo {int(round(first_bpm))}\n"
             )
             tex = header + body + sync_block
@@ -2005,6 +2681,7 @@ def _midi_to_score(
 ) -> dict[str, Any]:
     tab_hints = extract_guitar_tab_hints_from_midi(midi_path)
     midi = pretty_midi.PrettyMIDI(str(midi_path))
+    capo = _clamp_capo_0_5(capo)
     tempo_segments = _parse_tempo_segments(midi)
     ts_segments = _parse_time_signature_segments(midi)
     tempo = float(tempo_override) if tempo_override is not None else float(tempo_segments[0][1])
@@ -2012,15 +2689,22 @@ def _midi_to_score(
     ts0 = ts_segments[0]
     num, den = int(ts0[1]), int(ts0[2])
 
-    beats, _grid_step_sec = _quantized_beats_from_midi(
-        midi, tempo, onset_times_sec=onset_times_sec, tab_hints=tab_hints
-    )
-
     raw_notes = _raw_guitar_notes_from_midi(midi)
     max_end = max((n["end"] for n in raw_notes), default=0.0)
     max_end = max(max_end, 0.01)
     bars_info = _compute_bars_info(midi, max_end, bpm_override=tempo_override)
     chord_labels = _bar_chord_labels(raw_notes, bars_info, int(capo))
+
+    beats, _grid_step_sec = _quantized_beats_from_midi(
+        midi,
+        tempo,
+        preset=TRANSCRIPTION_PRESET,
+        onset_times_sec=onset_times_sec,
+        tab_hints=tab_hints,
+        bars_info=bars_info,
+        bar_chords=chord_labels,
+        capo=capo,
+    )
 
     return {
         "version": 1,
@@ -2032,6 +2716,8 @@ def _midi_to_score(
             "timeSignature": {"numerator": num, "denominator": den},
             "key": "C major",
             "capo": int(capo),
+            "capoMethod": "midi_only_0_5",
+            "capoCandidateRange": [int(CAPO_CANDIDATE_RANGE[0]), int(CAPO_CANDIDATE_RANGE[1])],
             "chords": chord_labels,
             "instrument": _midi_program_to_alphatab_instrument(_get_primary_midi_program(midi)),
         },
@@ -2045,6 +2731,81 @@ def _midi_to_score(
             }
         ],
     }
+
+
+def _render_transcription_alphatex(
+    midi_path: Path,
+    *,
+    title: str,
+    artist: str,
+    lyrics: str | None,
+    audio_duration_sec: float | None,
+    capo: int,
+    tempo_override: float | None,
+    onset_times_sec: list[float] | None,
+    tab_output_dir: Path | None,
+    tab_experiment_out: dict[str, Any] | None,
+) -> str:
+    return _midi_to_alphatex(
+        midi_path,
+        title=title,
+        artist=artist,
+        lyrics=lyrics,
+        audio_duration_sec=audio_duration_sec,
+        capo=capo,
+        tempo_override=tempo_override,
+        onset_times_sec=onset_times_sec,
+        tab_output_dir=tab_output_dir,
+        tab_experiment_out=tab_experiment_out,
+        preset=TRANSCRIPTION_PRESET,
+    )
+
+
+def _render_arrangement_alphatex(
+    midi_path: Path,
+    *,
+    title: str,
+    artist: str,
+    lyrics: str | None,
+    audio_duration_sec: float | None,
+    capo: int,
+    tempo_override: float | None,
+    onset_times_sec: list[float] | None,
+    tab_output_dir: Path | None,
+    tab_experiment_out: dict[str, Any] | None,
+    arrangement_relax_level: int = 0,
+) -> str:
+    return _midi_to_alphatex(
+        midi_path,
+        title=title,
+        artist=artist,
+        lyrics=lyrics,
+        audio_duration_sec=audio_duration_sec,
+        capo=capo,
+        tempo_override=tempo_override,
+        onset_times_sec=onset_times_sec,
+        tab_output_dir=tab_output_dir,
+        tab_experiment_out=tab_experiment_out,
+        preset=ARRANGEMENT_PRESET,
+        arrangement_relax_level=arrangement_relax_level,
+    )
+
+
+def _extract_pitch_onset_recall_from_compare_report(report_path: Path) -> float | None:
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    compare_after = payload.get("compare_after_export")
+    if not isinstance(compare_after, dict):
+        return None
+    val = compare_after.get("pitch_onset_recall_rate")
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
 
 
 def run_four_step_pipeline(
@@ -2094,7 +2855,8 @@ def run_four_step_pipeline(
     else:
         report(10, "lyrics", "가사 없음 (LRCLIB·설명에서 찾지 못함)")
 
-    capo_from_text = _guess_capo_from_text(title, lyrics)
+    render_mode = _resolve_tab_render_mode()
+    render_preset = _preset_for_mode(render_mode)
 
     report(25, "separate", "Demucs로 stem 분리 시작")
     stems = _separate_demucs(mp3_path, job_dir / "stems")
@@ -2112,7 +2874,15 @@ def run_four_step_pipeline(
 
     try:
         midi_adjust = pretty_midi.PrettyMIDI(str(midi_path))
-        snap_midi_notes_to_sixteenth_grid(midi_adjust, midi_bpm, [])
+        if render_preset.unified_grid:
+            snap_midi_notes_to_tempo_grid(
+                midi_adjust,
+                midi_bpm,
+                [],
+                subdivisions_per_quarter=render_preset.subdivisions_per_quarter,
+            )
+        else:
+            snap_midi_notes_to_sixteenth_grid(midi_adjust, midi_bpm, [])
         midi_adjust.write(str(midi_path))
     except Exception as exc:
         report(62, "quantize", f"MIDI 16분 그리드 스냅 생략/실패: {exc}")
@@ -2126,33 +2896,77 @@ def run_four_step_pipeline(
     else:
         report(68, "onset", f"onset 추출 실패·기본 후처리 사용 ({onset_meta.get('error') or 'unknown'})")
 
-    capo_guess = capo_from_text
+    capo_guess = 0
+    capo_method = "midi_only_0_5"
     try:
         midi_for_capo = pretty_midi.PrettyMIDI(str(midi_path))
         raw_capo = _raw_guitar_notes_from_midi(midi_for_capo)
         max_e_capo = max((n["end"] for n in raw_capo), default=0.01)
         bars_capo = _compute_bars_info(midi_for_capo, max_e_capo, bpm_override=midi_bpm)
-        capo_guess = _refine_capo_with_midi(raw_capo, bars_capo, capo_from_text)
+        capo_guess = _choose_capo_midi_only(raw_capo, bars_capo, render_mode=render_mode)
     except Exception as exc:
-        report(80, "capo", f"MIDI 기반 카포 보정 실패·텍스트만 사용 ({exc})")
-        capo_guess = capo_from_text
-    if capo_guess != capo_from_text:
-        report(82, "capo", f"카포: 텍스트 {capo_from_text} → MIDI보정 {capo_guess}")
-    else:
-        report(82, "capo", f"카포: {capo_guess}")
+        report(80, "capo", f"MIDI 기반 카포 탐색 실패·기본값 0 사용 ({exc})")
+        capo_guess = 0
+    capo_guess = _clamp_capo_0_5(capo_guess)
+    report(82, "capo", f"카포: {capo_guess} ({capo_method})")
 
-    report(85, "alphatex", "MIDI를 AlphaTex 문법으로 변환 시작")
-    alphatex = _midi_to_alphatex(
-        midi_path,
-        title=score_title,
-        artist=display_artist,
-        lyrics=lyrics,
-        audio_duration_sec=audio_dur,
-        capo=capo_guess,
-        tempo_override=midi_bpm,
-        onset_times_sec=onset_times_out,
-        tab_output_dir=job_dir / "tab",
-    )
+    report(85, "alphatex", f"MIDI를 AlphaTex 문법으로 변환 시작 (mode={render_mode})")
+    tab_experiment: dict[str, Any] = {}
+    arrangement_retry_applied = False
+    arrangement_recall_initial: float | None = None
+    arrangement_recall_final: float | None = None
+    arrangement_min_recall = _parse_arrangement_min_recall()
+    if render_mode == "arrangement":
+        alphatex = _render_arrangement_alphatex(
+            midi_path,
+            title=score_title,
+            artist=display_artist,
+            lyrics=lyrics,
+            audio_duration_sec=audio_dur,
+            capo=capo_guess,
+            tempo_override=midi_bpm,
+            onset_times_sec=onset_times_out,
+            tab_output_dir=job_dir / "tab",
+            tab_experiment_out=tab_experiment,
+            arrangement_relax_level=0,
+        )
+        report_path = job_dir / "tab" / "compare_report.json"
+        arrangement_recall_initial = _extract_pitch_onset_recall_from_compare_report(report_path)
+        arrangement_recall_final = arrangement_recall_initial
+        if arrangement_recall_initial is not None and arrangement_recall_initial < arrangement_min_recall:
+            arrangement_retry_applied = True
+            report(
+                89,
+                "quality",
+                f"arrangement recall {arrangement_recall_initial:.3f} < {arrangement_min_recall:.3f}, 완화 재시도",
+            )
+            alphatex = _render_arrangement_alphatex(
+                midi_path,
+                title=score_title,
+                artist=display_artist,
+                lyrics=lyrics,
+                audio_duration_sec=audio_dur,
+                capo=capo_guess,
+                tempo_override=midi_bpm,
+                onset_times_sec=onset_times_out,
+                tab_output_dir=job_dir / "tab",
+                tab_experiment_out=tab_experiment,
+                arrangement_relax_level=1,
+            )
+            arrangement_recall_final = _extract_pitch_onset_recall_from_compare_report(report_path)
+    else:
+        alphatex = _render_transcription_alphatex(
+            midi_path,
+            title=score_title,
+            artist=display_artist,
+            lyrics=lyrics,
+            audio_duration_sec=audio_dur,
+            capo=capo_guess,
+            tempo_override=midi_bpm,
+            onset_times_sec=onset_times_out,
+            tab_output_dir=job_dir / "tab",
+            tab_experiment_out=tab_experiment,
+        )
     score = _midi_to_score(
         midi_path,
         title=score_title,
@@ -2165,6 +2979,29 @@ def run_four_step_pipeline(
     (job_dir / "tab").mkdir(parents=True, exist_ok=True)
     (job_dir / "tab" / "guitar.alphatex").write_text(alphatex, encoding="utf-8")
     (job_dir / "tab" / "score.json").write_text(json.dumps(score, ensure_ascii=False, indent=2), encoding="utf-8")
+    compare_report_path = job_dir / "tab" / "compare_report.json"
+    if compare_report_path.exists():
+        try:
+            compare_payload = json.loads(compare_report_path.read_text(encoding="utf-8"))
+            compare_payload["capo_in_range_0_5"] = bool(0 <= int(capo_guess) <= 5)
+            compare_payload["chord_tone_hit_rate"] = float(
+                tab_experiment.get("chord_tone_hit_rate", 0.0)
+            )
+            compare_payload["shape_alignment_rate"] = float(
+                tab_experiment.get("shape_alignment_rate", 0.0)
+            )
+            compare_payload["riff_segment_ratio"] = float(
+                tab_experiment.get("riff_segment_ratio", 0.0)
+            )
+            compare_payload["capo_candidate_range"] = [
+                int(CAPO_CANDIDATE_RANGE[0]),
+                int(CAPO_CANDIDATE_RANGE[1]),
+            ]
+            compare_report_path.write_text(
+                json.dumps(compare_payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except (OSError, json.JSONDecodeError, ValueError, TypeError):
+            pass
     meta_payload = {
         "title": score_title,
         "youtube_title": title,
@@ -2206,9 +3043,19 @@ def run_four_step_pipeline(
                 "url": url,
                 "mp3_path": str(mp3_path),
                 "audio_duration_sec": audio_dur,
+                "mode": render_mode,
                 "capo_guess": capo_guess,
-                "capo_from_text": capo_from_text,
-                "alphatex_include_dy": _alphatex_emit_dynamics(),
+                "capo_method": capo_method,
+                "capo_candidate_range": [
+                    int(CAPO_CANDIDATE_RANGE[0]),
+                    int(CAPO_CANDIDATE_RANGE[1]),
+                ],
+                "capo_in_range_0_5": bool(0 <= int(capo_guess) <= 5),
+                "alphatex_rhythm_mode": (
+                    "arrangement_eighth"
+                    if render_mode == "arrangement"
+                    else "transcription_legacy"
+                ),
                 "lyrics_source": lyrics_source,
                 "lyrics_files": lyrics_files_info,
                 "midi_has_named_chord_track_hint": _midi_has_named_chord_track_hint(midi_chk),
@@ -2224,9 +3071,16 @@ def run_four_step_pipeline(
                 "alphatex_path": str(job_dir / "tab" / "guitar.alphatex"),
                 "tab_from_tab_midi": str(job_dir / "tab" / "tab_from_tab.mid"),
                 "tab_compare_report": str(job_dir / "tab" / "compare_report.json"),
+                "quality_gate": {
+                    "arrangement_min_recall": arrangement_min_recall,
+                    "arrangement_recall_initial": arrangement_recall_initial,
+                    "arrangement_recall_final": arrangement_recall_final,
+                    "arrangement_retry_applied": arrangement_retry_applied,
+                },
                 "job_meta_path": str(job_dir / "job_meta.json"),
                 "midi_bpm": midi_bpm,
                 "beat_times_count": 0,
+                "tab_experiment": tab_experiment,
             },
             ensure_ascii=False,
             indent=2,

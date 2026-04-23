@@ -1,6 +1,21 @@
 # AI Guitar Tab — 문제 정의서 (ML 관점)
+cd "C:\Users\kwakm\OneDrive\Desktop\Cusor-Project\AI-Guitar-Tab-main\backend"
+.\scripts\clear_tab_experiment_env.ps1
+Remove-Item Env:TAB_RENDER_MODE -ErrorAction SilentlyContinue
+Remove-Item Env:TAB_ARRANGEMENT_MIN_RECALL -ErrorAction SilentlyContinue
 cd "C:\Users\kwakm\OneDrive\Desktop\Cusor-Project\AI-Guitar-Tab-main"
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\backend\scripts\tab_experiment_env_all_on.ps1
+$env:ALPHATEX_QUARTER_GRID_ONLY = "1"
+$env:TAB_RENDER_MODE = "arrangement"
+$env:TAB_ARRANGEMENT_MIN_RECALL = "0.80"
 .\run_backend_py311.ps1
+
+cd "C:\Users\kwakm\OneDrive\Desktop\Cusor-Project\AI-Guitar-Tab-main"
+$env:TAB_RENDER_MODE = "arrangement"
+$env:TAB_ARRANGEMENT_MIN_RECALL = "0.80"
+.\run_backend_py311.ps1
+
 
 본 문서는 기타 연주 오디오로부터 타브(탭) 후보를 생성하는 파이프라인을 **머신러닝 과제**로 정리한 문제 정의서입니다.
 
@@ -39,6 +54,23 @@ npm run dev
 브라우저: http://localhost:3000
 7) 끝낼 때
 각 창에서 Ctrl + C 로 서버를 종료합니다.
+
+### 탭 렌더 모드(transcription/arrangement)
+
+- 기본값: `TAB_RENDER_MODE=transcription` (미설정 시 적용, 기존 전사형 동작 유지)
+- 편곡형 권장값: `TAB_RENDER_MODE=arrangement` (코드/패턴 중심, 리듬은 8분 기반으로 안정화)
+- 레거시 `TAB_*` 실험 플래그는 더 이상 지원하지 않습니다.
+- 품질 게이트: `TAB_ARRANGEMENT_MIN_RECALL` (기본 `0.80`) 미달 시 arrangement 렌더를 1회 완화 재시도합니다.
+
+PowerShell 예시:
+- `$env:TAB_RENDER_MODE = "transcription"`
+- `$env:TAB_RENDER_MODE = "arrangement"; $env:TAB_ARRANGEMENT_MIN_RECALL = "0.80"`
+
+bash 예시:
+- `export TAB_RENDER_MODE=transcription`
+- `export TAB_RENDER_MODE=arrangement; export TAB_ARRANGEMENT_MIN_RECALL=0.80`
+
+arrangement를 기본으로 바꾸려면 `backend/app/services/pipeline.py`의 `TAB_RENDER_MODE_DEFAULT`를 `"arrangement"`로 변경하면 됩니다.
 
 (선택) Fret-T5 추론까지 쓸 때만
 체크포인트·토크나이저 환경 변수는 재부팅 후 사라집니다. 그날 그날 백엔드를 켜기 직전, 백엔드를 띄우는 같은 PowerShell 창에서 예를 들어:

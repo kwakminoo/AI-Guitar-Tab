@@ -1,5 +1,5 @@
 """
-기타 스템 onset 추출 및 MIDI 16분음표 그리드 스냅.
+기타 스템 onset 추출 및 MIDI 템포 그리드 스냅(8분/16분 등).
 """
 
 from __future__ import annotations
@@ -11,15 +11,20 @@ import numpy as np
 import pretty_midi
 
 
-def snap_midi_notes_to_sixteenth_grid(
+def snap_midi_notes_to_tempo_grid(
     midi: pretty_midi.PrettyMIDI,
     bpm: float,
     beat_times_sec: list[float],
+    subdivisions_per_quarter: int,
 ) -> None:
-    """노트 시작을 (첫 박 기준) 1/16 노트 길이 그리드에 스냅. 종료는 길이 유지."""
+    """
+    노트 시작을 (앵커 기준) '한 박(4분음표)의 1/subdivisions_per_quarter' 길이 격자에 스냅.
+    subdivisions_per_quarter=4 → 16분음표, =2 → 8분음표. 종료는 길이 유지.
+    """
     bpm = max(20.0, min(300.0, float(bpm)))
+    spq = max(1, int(subdivisions_per_quarter))
     quarter_sec = 60.0 / bpm
-    sixteenth = quarter_sec / 4.0
+    step = quarter_sec / float(spq)
     t_anchor = float(beat_times_sec[0]) if beat_times_sec else 0.0
 
     for inst in midi.instruments:
@@ -27,11 +32,20 @@ def snap_midi_notes_to_sixteenth_grid(
             continue
         for note in inst.notes:
             rel = float(note.start) - t_anchor
-            k = round(rel / sixteenth)
-            new_start = max(0.0, t_anchor + k * sixteenth)
+            k = round(rel / step)
+            new_start = max(0.0, t_anchor + k * step)
             dur = max(1e-3, float(note.end) - float(note.start))
             note.start = new_start
             note.end = new_start + dur
+
+
+def snap_midi_notes_to_sixteenth_grid(
+    midi: pretty_midi.PrettyMIDI,
+    bpm: float,
+    beat_times_sec: list[float],
+) -> None:
+    """노트 시작을 (첫 박 기준) 1/16 노트 길이 그리드에 스냅. 종료는 길이 유지."""
+    snap_midi_notes_to_tempo_grid(midi, bpm, beat_times_sec, subdivisions_per_quarter=4)
 
 
 def analyze_onsets_from_guitar_audio(

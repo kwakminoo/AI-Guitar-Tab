@@ -154,6 +154,7 @@ def _call_omnizart_guitar_if_available(wav: Path, midi_out: Path) -> pretty_midi
 
 def transcribe_guitar_stem_to_midi(guitar_audio: Path, midi_out: Path) -> Path:
     """
+    TODO(deprecated): 현재 기본 파이프라인은 Basic Pitch를 사용하며, 이 경로는 실험/호환 용도로만 유지한다.
     분리된 기타 오디오(mp3/wav 등)를 Omnizart로 MIDI로 저장한다.
 
     Python 3.11 백엔드에서는 `backend/.venv_omnizart`(3.8 + omnizart) 서브프로세스를 우선 사용한다.

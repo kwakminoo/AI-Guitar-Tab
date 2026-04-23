@@ -1,8 +1,20 @@
+param(
+    # 탭 실험·AlphaTex 관련 env를 백엔드 기동 전에 한꺼번에 제거(기본 파이프라인으로 실행)
+    [switch]$ClearTabExperimentEnv
+)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $repoRoot = $PSScriptRoot
 $backendDir = Join-Path $repoRoot "backend"
+
+if ($ClearTabExperimentEnv) {
+    $clearScript = Join-Path $backendDir "scripts\clear_tab_experiment_env.ps1"
+    if (Test-Path $clearScript) {
+        . $clearScript
+    }
+}
 $venvDir = Join-Path $backendDir ".venv311"
 
 if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
