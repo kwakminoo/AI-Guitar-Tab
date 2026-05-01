@@ -17,6 +17,7 @@ _BACKEND = Path(__file__).resolve().parents[1]
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
+from app.services import pipeline as pipeline_mod  # noqa: E402
 from app.services.pipeline import _render_arrangement_alphatex, _render_transcription_alphatex  # noqa: E402
 
 
@@ -78,6 +79,15 @@ def _run_case(name: str, env_updates: dict[str, str], *, mode: str) -> dict:
 
 
 def main() -> None:
+    original_which = pipeline_mod.shutil.which
+    try:
+        pipeline_mod.shutil.which = lambda _cmd: None
+        diag = pipeline_mod._validate_alphatex_with_alphatab('\\title "smoke"\n:16 r |')
+        assert diag.get("tokenGuard", {}).get("skipped") is True
+        assert diag.get("hasErrors") is False
+    finally:
+        pipeline_mod.shutil.which = original_which
+
     _run_case("transcription_default", {}, mode="transcription")
     arrangement_out = _run_case(
         "arrangement_mode",
