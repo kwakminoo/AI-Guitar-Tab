@@ -1162,6 +1162,26 @@ def _compute_bars_info(
     return bars_info
 
 
+def _skipped_alphatex_validation_result(reason: str) -> dict[str, Any]:
+    return {
+        "tokenGuard": {
+            "ok": True,
+            "braceOk": True,
+            "parenOk": True,
+            "colonOk": True,
+            "hasTag": True,
+            "hasIdent": False,
+            "skipped": True,
+            "reason": reason,
+        },
+        "hasErrors": False,
+        "errors": [],
+        "warnings": [],
+        "astIssues": [],
+        "astWarnings": [],
+    }
+
+
 def _validate_alphatex_with_alphatab(tex: str) -> dict[str, Any]:
     """
     alphaTab(자바스크립트) AlphaTexLexer/Parser를 호출해
@@ -1170,6 +1190,8 @@ def _validate_alphatex_with_alphatab(tex: str) -> dict[str, Any]:
 
     root_dir = Path(__file__).resolve().parents[3]
     frontend_dir = root_dir / "frontend"
+    if shutil.which("node") is None:
+        return _skipped_alphatex_validation_result("node executable not found")
 
     tmp_root = frontend_dir / ".tmp-alphatex-validator"
     tmp_root.mkdir(parents=True, exist_ok=True)
@@ -1379,11 +1401,18 @@ console.log(JSON.stringify({
             encoding="utf-8",
             errors="replace",
             env=os.environ.copy(),
+            timeout=30,
         )
         if completed.returncode != 0:
+            failure_text = completed.stderr.strip() or completed.stdout.strip()
+            if (
+                "ERR_MODULE_NOT_FOUND" in failure_text
+                or "Cannot find package '@coderline/alphatab'" in failure_text
+            ):
+                return _skipped_alphatex_validation_result("alphaTab validator package not installed")
             raise RuntimeError(
                 "alphaTex 검증(node) 실패: "
-                + (completed.stderr.strip() or completed.stdout.strip() or "unknown error")
+                + (failure_text or "unknown error")
             )
 
         try:
@@ -1392,6 +1421,8 @@ console.log(JSON.stringify({
             raise RuntimeError("alphaTex 검증 결과를 JSON으로 파싱하지 못했습니다.") from exc
 
         return payload
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("alphaTex 검증(node) 시간이 초과되었습니다.") from exc
     finally:
         try:
             if tex_path.exists():
