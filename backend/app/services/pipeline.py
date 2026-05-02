@@ -59,6 +59,13 @@ HYBRID_RIFF_SHAPE_OUTSIDE_PENALTY = 0.18
 RIFF_CHORD_HIT_RATE_THRESHOLD = 0.42
 RIFF_NOTES_PER_SEC_THRESHOLD = 5.8
 RIFF_MEAN_MELODIC_STEP_THRESHOLD = 2.8
+STEM_QUALITY_ANALYZE_MAX_SEC = 45.0
+STEM_QUALITY_MIN_SEC = 1.2
+STEM_QUALITY_SILENT_RMS_DB = -44.0
+STEM_QUALITY_SILENT_PEAK_DB = -30.0
+STEM_QUALITY_NOISE_FLATNESS = 0.42
+STEM_QUALITY_NOISE_ZCR = 0.22
+STEM_QUALITY_MIN_ONSETS = 6
 
 
 @dataclass(frozen=True)
@@ -1602,6 +1609,113 @@ def _ensure_flat_guitar_stem_mp3(stems: dict[str, Path], stems_root: Path) -> Pa
     return dest
 
 
+def _ensure_flat_target_stem_mp3(stems: dict[str, Path], stems_root: Path, target: str) -> Path:
+    src = stems.get(target)
+    if not src or not src.is_file():
+        raise RuntimeError(f"Demucs 출력에서 {target} stem을 찾지 못했습니다.")
+    stems_root.mkdir(parents=True, exist_ok=True)
+    dest = stems_root / f"{target}.mp3"
+    try:
+        if src.resolve() != dest.resolve():
+            shutil.copy2(src, dest)
+    except OSError as exc:
+        raise RuntimeError(f"{target} stem을 {dest} 로 복사하지 못했습니다: {exc}") from exc
+    stems[target] = dest
+    return dest
+
+
+def _to_dbfs(amp: float, *, floor: float = -120.0) -> float:
+    if not math.isfinite(amp) or amp <= 1e-12:
+        return floor
+    return float(20.0 * math.log10(max(1e-12, amp)))
+
+
+def _analyze_stem_quality(audio_path: Path) -> dict[str, Any]:
+    """
+    가벼운 통계 기반 스템 품질 판별.
+    실패 시에도 안전한 결과를 반환한다.
+    """
+    out: dict[str, Any] = {
+        "path": str(audio_path),
+        "exists": bool(audio_path and audio_path.is_file()),
+        "duration_sec": 0.0,
+        "sample_rate": 0,
+        "rms_db": -120.0,
+        "peak_db": -120.0,
+        "zcr": 0.0,
+        "onset_count": 0,
+        "spectral_flatness_mean": 1.0,
+        "is_silent_like": True,
+        "is_noise_like": True,
+        "is_playable_source": False,
+        "analysis_error": None,
+    }
+    if not audio_path or not audio_path.is_file():
+        out["analysis_error"] = "missing_stem_file"
+        return out
+    try:
+        import librosa
+        import numpy as np
+
+        y, sr = librosa.load(str(audio_path), sr=22050, mono=True, duration=STEM_QUALITY_ANALYZE_MAX_SEC)
+        if y is None or len(y) == 0:
+            out["analysis_error"] = "empty_audio_after_decode"
+            return out
+
+        duration_sec = float(len(y) / max(1, sr))
+        rms = float(np.sqrt(np.mean(np.square(y))) + 1e-12)
+        peak = float(np.max(np.abs(y)) + 1e-12)
+        zcr = float(np.mean(librosa.feature.zero_crossing_rate(y=y, frame_length=2048, hop_length=512)))
+        flatness = float(np.mean(librosa.feature.spectral_flatness(y=y, n_fft=2048, hop_length=512)))
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+        onset_count = int(
+            len(
+                librosa.onset.onset_detect(
+                    onset_envelope=onset_env,
+                    sr=sr,
+                    units="time",
+                    backtrack=False,
+                    pre_max=10,
+                    post_max=10,
+                    pre_avg=20,
+                    post_avg=20,
+                    delta=0.2,
+                    wait=5,
+                )
+            )
+        )
+        rms_db = _to_dbfs(rms)
+        peak_db = _to_dbfs(peak)
+        is_silent_like = (
+            duration_sec < STEM_QUALITY_MIN_SEC
+            or (rms_db <= STEM_QUALITY_SILENT_RMS_DB and peak_db <= STEM_QUALITY_SILENT_PEAK_DB)
+        )
+        is_noise_like = (
+            flatness >= STEM_QUALITY_NOISE_FLATNESS
+            and zcr >= STEM_QUALITY_NOISE_ZCR
+            and onset_count < STEM_QUALITY_MIN_ONSETS
+        )
+        is_playable_source = (not is_silent_like) and (not is_noise_like) and onset_count >= STEM_QUALITY_MIN_ONSETS
+        out.update(
+            {
+                "duration_sec": round(duration_sec, 3),
+                "sample_rate": int(sr),
+                "rms_db": round(rms_db, 3),
+                "peak_db": round(peak_db, 3),
+                "zcr": round(zcr, 5),
+                "onset_count": int(onset_count),
+                "spectral_flatness_mean": round(flatness, 5),
+                "is_silent_like": bool(is_silent_like),
+                "is_noise_like": bool(is_noise_like),
+                "is_playable_source": bool(is_playable_source),
+            }
+        )
+        return out
+    except Exception as exc:
+        out["analysis_error"] = str(exc)
+        return out
+
+
 def _basic_pitch_to_midi(guitar_audio: Path, midi_out: Path) -> Path:
     """기타 WAV(또는 오디오) → Basic Pitch → `midi_out` 경로로 정리."""
     midi_out.parent.mkdir(parents=True, exist_ok=True)
@@ -1621,6 +1735,11 @@ def _basic_pitch_to_midi(guitar_audio: Path, midi_out: Path) -> Path:
 def _guitar_wav_to_midi_basic_pitch(guitar_wav: Path, midi_out: Path) -> Path:
     """기타 스템 WAV → Basic Pitch MIDI."""
     return _basic_pitch_to_midi(guitar_wav, midi_out)
+
+
+def _instrument_wav_to_midi_basic_pitch(instrument_wav: Path, midi_out: Path) -> Path:
+    """선택된 스템 WAV → Basic Pitch MIDI."""
+    return _basic_pitch_to_midi(instrument_wav, midi_out)
 
 
 def _match_tab_hint_for_note(
@@ -2321,15 +2440,23 @@ def _midi_to_alphatex(
                 out.append(round(v, 6))
         return out
 
-    def active_content_with_dy(t0: float, prev_dy: str | None) -> tuple[str, str | None]:
-        active: list[dict[str, Any]] = [
-            n for n in note_events if n["start"] <= t0 + eps and n["end"] > t0 + eps
-        ]
-        if not active:
-            return "r", prev_dy
+    def onset_content_with_dy(
+        t0: float, prev_dy: str | None
+    ) -> tuple[tuple[tuple[int, int], ...], str, str | None]:
+        onset: list[dict[str, Any]] = []
+        for n in note_events:
+            start_t = (
+                round(_snap_time_to_grid(float(n["start"])), 6)
+                if preset.use_grid_boundaries
+                else float(n["start"])
+            )
+            if abs(start_t - t0) <= 1e-5:
+                onset.append(n)
+        if not onset:
+            return tuple(), "r", prev_dy
 
         by_string: dict[int, dict[str, Any]] = {}
-        for n in active:
+        for n in onset:
             s = int(n["string"])
             existing = by_string.get(s)
             if existing is None:
@@ -2339,6 +2466,7 @@ def _midi_to_alphatex(
                 by_string[s] = n
 
         chosen = sorted(by_string.values(), key=lambda x: (x["string"], x["fret"]))
+        snap = tuple((int(n["string"]), int(n["fret"])) for n in chosen)
         max_vel = max(int(n["velocity"]) for n in chosen)
         dy = _velocity_to_dy(max_vel)
         if len(chosen) == 1:
@@ -2349,10 +2477,10 @@ def _midi_to_alphatex(
             base = f"({chord})"
 
         if not emit_dy:
-            return base, prev_dy
+            return snap, base, prev_dy
         if prev_dy is None or dy != prev_dy:
-            return f"{base} {{dy {dy}}}", dy
-        return base, prev_dy
+            return snap, f"{base} {{dy {dy}}}", dy
+        return snap, base, prev_dy
 
     bars: list[str] = []
 
@@ -2390,11 +2518,9 @@ def _midi_to_alphatex(
     if preset.use_grid_boundaries:
         for n in note_events:
             boundaries.add(round(_snap_time_to_grid(float(n["start"])), 6))
-            boundaries.add(round(_snap_time_to_grid(float(n["end"])), 6))
     else:
         for n in note_events:
             boundaries.add(float(n["start"]))
-            boundaries.add(float(n["end"]))
     sorted_boundaries = uniq_sorted(list(boundaries))
     boundary_count_after = len(sorted_boundaries)
 
@@ -2454,15 +2580,13 @@ def _midi_to_alphatex(
         t1b = float(sorted_boundaries[idx + 1])
         if t1b <= t0b + eps:
             continue
-        snap = _tab_snapshot_key(note_events, t0b, eps)
-        full_tok, prev_dy_m = active_content_with_dy(t0b, prev_dy_m)
+        snap, full_tok, prev_dy_m = onset_content_with_dy(t0b, prev_dy_m)
         base_tok = _strip_dy_from_alphatex_note_token(full_tok)
         raw_chunks.append((t0b, t1b, snap, full_tok, base_tok))
 
-    use_voice_merge = preset.use_merge_voice_key
     merged_rows: list[list[Any]] = []
     for t0b, t1b, snap, full_tok, base_tok in raw_chunks:
-        mkey = _tab_merge_row_key(note_events, t0b, eps, use_voice=use_voice_merge)
+        mkey: Any = ("rest",) if not snap else ("onset", round(t0b, 6), snap)
         if merged_rows and mkey == merged_rows[-1][5] and abs(t0b - merged_rows[-1][1]) < 1e-5:
             merged_rows[-1][1] = t1b
         else:
@@ -2860,13 +2984,60 @@ def run_four_step_pipeline(
 
     report(25, "separate", "Demucs로 stem 분리 시작")
     stems = _separate_demucs(mp3_path, job_dir / "stems")
-    guitar_mp3 = _ensure_flat_guitar_stem_mp3(stems, job_dir / "stems")
-    guitar_wav = job_dir / "stems" / "guitar.wav"
-    report(35, "convert", "기타 스템 MP3 → WAV(44.1k mono)")
-    _ffmpeg_mp3_to_wav_mono_44k(guitar_mp3, guitar_wav)
+    stems_root = job_dir / "stems"
+    guitar_stem_mp3 = stems.get("guitar")
+    piano_stem_mp3 = stems.get("piano")
+    guitar_quality = _analyze_stem_quality(guitar_stem_mp3) if guitar_stem_mp3 else {
+        "exists": False,
+        "is_playable_source": False,
+        "analysis_error": "missing_guitar_stem",
+    }
+    piano_quality = _analyze_stem_quality(piano_stem_mp3) if piano_stem_mp3 else {
+        "exists": False,
+        "is_playable_source": False,
+        "analysis_error": "missing_piano_stem",
+    }
+    report(
+        31,
+        "stem-q",
+        f'guitar playable={bool(guitar_quality.get("is_playable_source"))} '
+        f'rms={guitar_quality.get("rms_db")} onset={guitar_quality.get("onset_count")}',
+    )
+    report(
+        32,
+        "stem-q",
+        f'piano playable={bool(piano_quality.get("is_playable_source"))} '
+        f'rms={piano_quality.get("rms_db")} onset={piano_quality.get("onset_count")}',
+    )
 
-    report(50, "basic-pitch", "Basic Pitch로 기타 WAV → MIDI 변환")
-    midi_path = _guitar_wav_to_midi_basic_pitch(guitar_wav, job_dir / "midi" / "guitar.mid")
+    selected_source = "fallback"
+    selected_stem_mp3 = mp3_path
+    midi_source_reason = "guitar/piano 모두 무효 또는 누락 -> mix(source.mp3) fallback"
+    if bool(guitar_quality.get("is_playable_source")) and guitar_stem_mp3 and guitar_stem_mp3.is_file():
+        selected_source = "guitar"
+        selected_stem_mp3 = _ensure_flat_target_stem_mp3(stems, stems_root, "guitar")
+        midi_source_reason = "guitar stem 품질 통과"
+    elif bool(piano_quality.get("is_playable_source")) and piano_stem_mp3 and piano_stem_mp3.is_file():
+        selected_source = "piano"
+        selected_stem_mp3 = _ensure_flat_target_stem_mp3(stems, stems_root, "piano")
+        midi_source_reason = "guitar 무효 + piano stem 품질 통과"
+    report(33, "source", f"MIDI 소스 선택: {selected_source} ({midi_source_reason})")
+
+    if guitar_stem_mp3 and guitar_stem_mp3.is_file():
+        guitar_mp3 = _ensure_flat_target_stem_mp3(stems, stems_root, "guitar")
+    else:
+        guitar_mp3 = selected_stem_mp3
+    selected_stem_wav = stems_root / f"{selected_source}.wav"
+    guitar_wav = stems_root / "guitar.wav"
+    report(35, "convert", f"{selected_source} 스템 MP3 → WAV(44.1k mono)")
+    _ffmpeg_mp3_to_wav_mono_44k(selected_stem_mp3, selected_stem_wav)
+    if selected_source == "guitar":
+        guitar_wav = selected_stem_wav
+    elif not guitar_wav.exists():
+        _ffmpeg_mp3_to_wav_mono_44k(guitar_mp3, guitar_wav)
+
+    report(50, "basic-pitch", f"Basic Pitch로 {selected_source} WAV → MIDI 변환")
+    midi_path = _instrument_wav_to_midi_basic_pitch(selected_stem_wav, job_dir / "midi" / "guitar.mid")
 
     midi_for_bpm = pretty_midi.PrettyMIDI(str(midi_path))
     midi_bpm = _primary_bpm_from_midi(midi_for_bpm)
@@ -2887,8 +3058,8 @@ def run_four_step_pipeline(
     except Exception as exc:
         report(62, "quantize", f"MIDI 16분 그리드 스냅 생략/실패: {exc}")
 
-    report(65, "onset", "기타 stem onset 추출(음 과다 표기 완화)")
-    onset_meta = analyze_onsets_from_guitar_audio(guitar_mp3, bpm_hint=midi_bpm)
+    report(65, "onset", f"{selected_source} stem onset 추출(음 과다 표기 완화)")
+    onset_meta = analyze_onsets_from_guitar_audio(selected_stem_mp3, bpm_hint=midi_bpm)
     onset_times_out: list[float] = []
     if onset_meta.get("ok"):
         onset_times_out = list(onset_meta.get("onset_times_sec") or [])
@@ -3020,6 +3191,12 @@ def run_four_step_pipeline(
         "downbeat_indices": [],
         "onset_analysis_ok": bool(onset_meta.get("ok")),
         "onset_times_sec": onset_times_out,
+        "midi_source_stem": selected_source,
+        "midi_source_reason": midi_source_reason,
+        "guitar_stem_quality": guitar_quality,
+        "piano_stem_quality": piano_quality,
+        "selected_stem_mp3": str(selected_stem_mp3),
+        "selected_stem_wav": str(selected_stem_wav),
     }
     if onset_meta.get("error"):
         job_meta_payload["onset_analysis_error"] = onset_meta["error"]
@@ -3061,8 +3238,14 @@ def run_four_step_pipeline(
                 "midi_has_named_chord_track_hint": _midi_has_named_chord_track_hint(midi_chk),
                 "midi_note_events_only": True,
                 "chords_on_score": "마디별 음높이로 추정(표기용). Basic Pitch MIDI에는 코드 문자열이 들어가지 않음.",
-                "guitar_stem_mp3": str(job_dir / "stems" / "guitar.mp3"),
-                "guitar_stem_wav": str(job_dir / "stems" / "guitar.wav"),
+                "midi_source_stem": selected_source,
+                "midi_source_reason": midi_source_reason,
+                "guitar_stem_quality": guitar_quality,
+                "piano_stem_quality": piano_quality,
+                "selected_stem_mp3": str(selected_stem_mp3),
+                "selected_stem_wav": str(selected_stem_wav),
+                "guitar_stem_mp3": str(guitar_mp3),
+                "guitar_stem_wav": str(guitar_wav),
                 "stems": {k: str(v) for k, v in stems.items()},
                 "midi_path": str(midi_path),
                 "tab_hints_extracted": len(extract_guitar_tab_hints_from_midi(midi_path)),

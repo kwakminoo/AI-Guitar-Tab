@@ -1,0 +1,61 @@
+{
+  "youtube_url": "https://www.youtube.com/watch?v=nDbNRb9gOr4",
+  "url_hash_suffix": "e0379f5f",
+  "viewport": { "width": 1280, "height": 720 },
+  "screenshots": {
+    "transcription": "docs/tab_mode_ab/tab_compare_nDbNRb9gOr4_transcription.png",
+    "arrangement": "docs/tab_mode_ab/tab_compare_nDbNRb9gOr4_arrangement.png"
+  },
+  "transcription_job": {
+    "job_dir_suffix": "-12",
+    "summary_paths": [
+      "backend/data/jobs/夜明けと蛍-ナブナ-e0379f5f-12/tab/summary.json",
+      "backend/data/jobs/夜明けと蛍-ナブナ-e0379f5f-12/tab/compare_report.json"
+    ],
+    "mode": "transcription",
+    "alphatex_rhythm_mode": "transcription_legacy",
+    "quality_gate": {
+      "arrangement_min_recall": 0.8,
+      "arrangement_recall_initial": null,
+      "arrangement_recall_final": null,
+      "arrangement_retry_applied": false
+    },
+    "tab_experiment": {
+      "mean_tokens_per_bar": 21.4713,
+      "grid_step_sec": 0.0625
+    },
+    "compare_after_export": {
+      "pitch_onset_recall_rate": 0.709,
+      "f1_onset_symmetric": 0.8297,
+      "tab_note_count": 1457,
+      "reference_guitar_note_count": 2055,
+      "onset_match_rate": 1.0
+    }
+  },
+  "arrangement_job": {
+    "job_dir_suffix": "-13",
+    "summary_paths": [
+      "backend/data/jobs/夜明けと蛍-ナブナ-e0379f5f-13/tab/summary.json",
+      "backend/data/jobs/夜明けと蛍-ナブナ-e0379f5f-13/tab/compare_report.json"
+    ],
+    "mode": "arrangement",
+    "alphatex_rhythm_mode": "arrangement_eighth",
+    "quality_gate": {
+      "arrangement_min_recall": 0.8,
+      "arrangement_recall_initial": 0.7463,
+      "arrangement_recall_final": 0.7821,
+      "arrangement_retry_applied": true
+    },
+    "tab_experiment": {
+      "mean_tokens_per_bar": 15.3885,
+      "grid_step_sec": 0.25
+    },
+    "compare_after_export": {
+      "pitch_onset_recall_rate": 0.7821,
+      "f1_onset_symmetric": 0.8777,
+      "tab_note_count": 1583,
+      "reference_guitar_note_count": 2093,
+      "onset_match_rate": 1.0
+    }
+  }
+}

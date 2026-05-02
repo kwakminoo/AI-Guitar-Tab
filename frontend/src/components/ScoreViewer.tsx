@@ -355,25 +355,13 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
   const [isLooping, setIsLooping] = useState(false);
   const [zoom, setZoom] = useState("100");
   const [layout, setLayout] = useState<"page" | "horizontal">("page");
-  const [isStudyMode, setIsStudyMode] = useState(false);
-  const [allowSeekByClick, setAllowSeekByClick] = useState(true);
   const [activeBeatText, setActiveBeatText] = useState<string>("대기 중");
   const [selectionState, setSelectionState] = useState<string>("선택 없음");
   const [hoveredNoteText, setHoveredNoteText] = useState<string>("노트 정보 없음");
   const [abRangeMs, setAbRangeMs] = useState<number | null>(null);
-  const [masterVolume, setMasterVolume] = useState(1);
-  const [metronomeVolumeRatio, setMetronomeVolumeRatio] = useState(0);
   const [apiErrorMessage, setApiErrorMessage] = useState<string | null>(null);
-  const [midiStageText, setMidiStageText] = useState("MIDI 대기");
-  const [midiEventCount, setMidiEventCount] = useState(0);
-  const [metronomeTickCount, setMetronomeTickCount] = useState(0);
-  const [playbackSpeed, setPlaybackSpeed] = useState(1);
-  const [speedTrainerEnabled, setSpeedTrainerEnabled] = useState(false);
-  const [playedBeatText, setPlayedBeatText] = useState("재생 비트 정보 없음");
   const [renderStageText, setRenderStageText] = useState("렌더 대기");
   const [playerStateText, setPlayerStateText] = useState("정지");
-  const [outputDevices, setOutputDevices] = useState<Array<{ id?: string; label?: string }>>([]);
-  const [selectedOutputDeviceId, setSelectedOutputDeviceId] = useState("default");
   /** 가사 박스 / 타브 악보 / 테스트 악보 */
   const [scorePanelMode, setScorePanelMode] = useState<"lyrics" | "tab" | "test">("tab");
   const [testAlphaTex, setTestAlphaTex] = useState<string>(FALLBACK_TEST_ALPHATEX);
@@ -382,12 +370,6 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
   const selectionStartTickRef = useRef<number | null>(null);
   const previousSecondRef = useRef(-1);
   const dragStartBeatRef = useRef<unknown | null>(null);
-
-  useEffect(() => {
-    if (isStudyMode) {
-      setAllowSeekByClick(false);
-    }
-  }, [isStudyMode]);
 
   useEffect(() => {
     if (!songLyrics?.trim() && scorePanelMode === "lyrics") {
@@ -498,16 +480,16 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
         layout === "horizontal" ? alphaTab.LayoutMode.Horizontal : alphaTab.LayoutMode.Page;
       settings.display.scale = Number.parseInt(zoom, 10) / 100;
       settings.display.padding = [10, 10, 10, 10];
-      settings.display.barsPerRow = isStudyMode && layout === "page" ? 4 : -1;
+      settings.display.barsPerRow = -1;
       settings.display.startBar = 1;
-      settings.display.barCount = isStudyMode ? 16 : -1;
+      settings.display.barCount = -1;
       settings.display.barCountPerPartial = 8;
       settings.display.justifyLastSystem = true;
-      settings.display.stretchForce = isStudyMode ? 0.92 : 1;
+      settings.display.stretchForce = 1;
       // ESM 로드 시 합성·워커 경로(BrowserModule) 사용 — scriptFile 은 덮어쓰지 않음.
       settings.core.useWorkers = true;
       settings.core.enableLazyLoading = true;
-      settings.core.includeNoteBounds = isStudyMode;
+      settings.core.includeNoteBounds = false;
       settings.core.engine = "svg";
       settings.core.fontDirectory = `${ALPHATAB_LOCAL_DIST}/font/`;
       // 개발 중 콘솔 노이즈를 줄이고, 프로덕션에서만 경고 이상 로그를 남긴다.
@@ -519,7 +501,7 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
       settings.notation.slurHeight = 5;
       const hasLyricsForStaff = Boolean(lyricsForStaff);
       settings.notation.rhythmHeight =
-        hasLyricsForStaff && scorePanelMode === "lyrics" ? 34 : isStudyMode ? 30 : 25;
+        hasLyricsForStaff && scorePanelMode === "lyrics" ? 34 : 25;
       settings.notation.transpositionPitches = [0];
       settings.notation.displayTranspositionPitches = [0];
       if (alphaTab.NotationMode?.GuitarPro !== undefined) {
@@ -542,19 +524,19 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
       settings.player.enableCursor = true;
       settings.player.enableElementHighlighting = true;
       settings.player.enableAnimatedBeatCursor = true;
-      settings.player.enableUserInteraction = allowSeekByClick;
-      settings.player.bufferTimeInMilliseconds = isStudyMode ? 460 : 380;
+      settings.player.enableUserInteraction = true;
+      settings.player.bufferTimeInMilliseconds = 380;
       // 재생 시 스크롤: alphaTab PlayerSettings.scrollMode + 기본 IScrollHandler
       // (vendor/alphatab PlayerSettings.ScrollMode, ScrollHandlers.ts)
       // OffScreen: 현재 마디/시스템이 뷰포트 밖으로 나갈 때만 세로 스크롤 → 재생 위치가 보이도록 유지
-      settings.player.nativeBrowserSmoothScroll = !isStudyMode;
+      settings.player.nativeBrowserSmoothScroll = true;
       if (alphaTab.ScrollMode?.OffScreen !== undefined) {
         settings.player.scrollMode = alphaTab.ScrollMode.OffScreen;
       }
       settings.player.scrollOffsetX = 0;
-      settings.player.scrollOffsetY = isStudyMode ? -24 : -12;
+      settings.player.scrollOffsetY = -12;
       // nativeBrowserSmoothScroll=false일 때에만 scrollSpeed가 유효하다.
-      settings.player.scrollSpeed = isStudyMode ? 220 : 300;
+      settings.player.scrollSpeed = 300;
       settings.player.soundFont = `${ALPHATAB_LOCAL_DIST}/soundfont/sonivox.sf2`;
       if (viewportRef.current) {
         settings.player.scrollElement = viewportRef.current;
@@ -563,14 +545,6 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
       const api = new alphaTab.AlphaTabApi(mainRef.current, settings);
       apiRef.current = api;
       setApiErrorMessage(null);
-      setMasterVolume(Math.max(0, Math.min(1, api.masterVolume ?? 1)));
-      setMetronomeVolumeRatio(Math.max(0, Math.min(1, api.metronomeVolume ?? 0)));
-      setPlaybackSpeed(api.playbackSpeed ?? 1);
-      setMidiEventCount(0);
-      setMetronomeTickCount(0);
-      setMidiStageText("MIDI 대기");
-      setOutputDevices([]);
-      setSelectedOutputDeviceId("default");
 
       if ("customCursorHandler" in api) {
         api.customCursorHandler = {
@@ -665,32 +639,11 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
           list.appendChild(row);
         });
         markActiveTracks();
-        const hasNoteBounds = Boolean(api.boundsLookup);
-        if (isStudyMode) {
-          setHoveredNoteText(hasNoteBounds ? "노트 탐색 준비됨" : "노트 경계 정보 없음");
-        }
         const totalMs = api.endTime ?? 0;
         if (totalMs > 0) {
           setRemainingTime(formatDurationMs(totalMs));
         } else {
           setRemainingTime("--:--");
-        }
-        if (api.enumerateOutputDevices) {
-          api
-            .enumerateOutputDevices()
-            .then((devices) => {
-              if (disposed) return;
-              setOutputDevices(devices);
-              void (async () => {
-                const current = await api.getOutputDevice?.();
-                setSelectedOutputDeviceId(current?.id ?? "default");
-              })();
-            })
-            .catch(() => {
-              if (disposed) return;
-              setOutputDevices([]);
-              setSelectedOutputDeviceId("default");
-            });
         }
       });
 
@@ -746,36 +699,12 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
         const denom = Math.max(1, api.endTime ?? e.endTime);
         const progress = Math.max(0, Math.min(100, (e.currentTime / denom) * 100));
         setPlayerProgress(`${Math.floor(progress)}%`);
-        const tick = Number(api.tickPosition ?? 0);
-        if (api.tickCache && Number.isFinite(tick)) {
-          const lookup = api.tickCache.findBeat(new Set(api.tracks.map((t) => t.index)), tick);
-          if (lookup?.beat) {
-            setPlayedBeatText(`tickCache 비트 추적 중 (tick ${Math.floor(tick)})`);
-          }
-        }
         api.scrollToCursor?.();
       });
 
       if (alphaTab.midi?.MidiEventType?.AlphaTabMetronome !== undefined) {
         api.midiEventsPlayedFilter = [alphaTab.midi.MidiEventType.AlphaTabMetronome];
       }
-      api.midiLoad?.on(() => {
-        setMidiStageText("MIDI 생성/로딩 중...");
-      });
-      api.midiLoaded?.on((e) => {
-        setMidiStageText("MIDI 로딩 완료");
-        if (typeof e.endTime === "number" && e.endTime > 0) {
-          setRemainingTime(formatDurationMs(e.endTime));
-        }
-      });
-      api.midiEventsPlayed?.on((e) => {
-        const events = e.events ?? [];
-        setMidiEventCount((prev) => prev + events.length);
-        const metronomeTicks = events.filter((evt) => evt.isMetronome).length;
-        if (metronomeTicks > 0) {
-          setMetronomeTickCount((prev) => prev + metronomeTicks);
-        }
-      });
 
       api.error?.on((error) => {
         const message = error instanceof Error ? error.message : "재생/렌더 처리 중 오류가 발생했습니다.";
@@ -868,19 +797,6 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
           setHoveredNoteText(`노트: ${n.string}번줄 ${n.fret}프렛`);
         }
       });
-      api.noteMouseDown?.on((note) => {
-        if (isStudyMode) {
-          api.playNote?.(note);
-        }
-      });
-      api.noteMouseUp?.on((note) => {
-        if (!note || !isStudyMode) return;
-        api.playNote?.(note);
-      });
-      api.playedBeatChanged?.on((beat) => {
-        const b = beat as { id?: number };
-        setPlayedBeatText(typeof b?.id === "number" ? `재생 비트 ID: ${b.id}` : "재생 비트 갱신");
-      });
       api.playbackRangeChanged?.on((e) => {
         if (e.playbackRange) {
           const { startTick, endTick } = e.playbackRange;
@@ -898,10 +814,6 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
       });
       api.playerFinished?.on(() => {
         setPlayerStateText("재생 완료");
-        if (!speedTrainerEnabled) return;
-        const nextSpeed = Math.min(1.5, (api.playbackSpeed ?? 1) + 0.05);
-        api.playbackSpeed = nextSpeed;
-        setPlaybackSpeed(nextSpeed);
       });
       api.resize?.on((args) => {
         const width = args.newWidth ?? 0;
@@ -941,11 +853,8 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
       apiRef.current = null;
     };
   }, [
-    allowSeekByClick,
-    isStudyMode,
     layout,
     scoreForRendering,
-    speedTrainerEnabled,
     zoom,
     alphaTex,
     hasBackendAlphaTex,
@@ -971,7 +880,7 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
     const next = !isMetronome;
     setIsMetronome(next);
     if (apiRef.current) {
-      const target = next ? Math.max(0.05, metronomeVolumeRatio) : 0;
+      const target = next ? 0.5 : 0;
       apiRef.current.metronomeVolume = target;
     }
   };
@@ -984,52 +893,6 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
 
   const handlePrint = () => {
     apiRef.current?.print();
-  };
-
-  const handlePrintA4 = () => {
-    apiRef.current?.print(undefined, {
-      display: { scale: 0.8, stretchForce: 0.8 },
-    });
-  };
-
-  const handleOutputDeviceChange = async (deviceId: string) => {
-    setSelectedOutputDeviceId(deviceId);
-    const api = apiRef.current;
-    if (!api?.setOutputDevice) return;
-    if (deviceId === "default") {
-      await api.setOutputDevice(null);
-      return;
-    }
-    const selected = outputDevices.find((d) => d.id === deviceId) ?? null;
-    await api.setOutputDevice(selected);
-  };
-
-  const handleResetSoundFonts = () => {
-    apiRef.current?.resetSoundFonts?.();
-    setApiErrorMessage("사운드폰트 캐시를 초기화했습니다. 필요 시 다시 로딩됩니다.");
-  };
-
-  const handleZoomChange = (value: string) => {
-    setZoom(value);
-    const api = apiRef.current;
-    if (!api) return;
-    api.settings.display.scale = Number.parseInt(value, 10) / 100;
-    api.updateSettings();
-    api.render();
-  };
-
-  const handleLayoutChange = (value: "page" | "horizontal") => {
-    setLayout(value);
-    const api = apiRef.current;
-    const alphaTab = alphaTabModuleRef.current;
-    if (!alphaTab) return;
-    if (!api) return;
-    api.settings.display.layoutMode =
-      value === "horizontal"
-        ? alphaTab.LayoutMode.Horizontal
-        : alphaTab.LayoutMode.Page;
-    api.updateSettings();
-    api.render();
   };
 
   const displayTitle =
@@ -1176,186 +1039,6 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
                     <p>총 길이: {apiRef.current?.endTime ? formatDurationMs(apiRef.current.endTime) : "--:--"}</p>
                     <p>총 Tick: {Math.floor(apiRef.current?.endTick ?? 0)}</p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setIsStudyMode((prev) => !prev)}
-                    aria-pressed={isStudyMode}
-                    className={`h-9 w-full rounded-lg border px-2 text-xs font-medium transition ${
-                      isStudyMode
-                        ? "border-amber-500 bg-amber-50 text-amber-800"
-                        : "border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-100"
-                    }`}
-                  >
-                    {isStudyMode ? "학습 모드 ON (16마디/4마디행)" : "학습 모드 OFF"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAllowSeekByClick((prev) => !prev)}
-                    aria-pressed={allowSeekByClick}
-                    className={`h-9 w-full rounded-lg border px-2 text-xs font-medium transition ${
-                      allowSeekByClick
-                        ? "border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-100"
-                        : "border-amber-500 bg-amber-50 text-amber-800"
-                    }`}
-                    title="재생 중 악보 클릭 시 탐색(Seek) 동작"
-                  >
-                    {allowSeekByClick ? "클릭 탐색 ON" : "클릭 탐색 OFF (실수 방지)"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      apiRef.current?.clearPlaybackRangeHighlight?.();
-                      setSelectionState("선택 구간 하이라이트 해제");
-                      setAbRangeMs(null);
-                    }}
-                    className="h-9 w-full rounded-lg border border-zinc-300 bg-white px-2 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100"
-                  >
-                    선택 구간 해제
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => apiRef.current?.downloadMidi?.()}
-                    className="h-9 w-full rounded-lg border border-zinc-300 bg-white px-2 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100"
-                  >
-                    MIDI 다운로드
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const api = apiRef.current;
-                      if (!api) return;
-                      if (isPlaying) api.pause?.();
-                      else api.play?.();
-                    }}
-                    className="h-9 w-full rounded-lg border border-zinc-300 bg-white px-2 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100"
-                  >
-                    {isPlaying ? "pause()" : "play()"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => apiRef.current?.loadMidiForScore?.()}
-                    className="h-9 w-full rounded-lg border border-zinc-300 bg-white px-2 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100"
-                  >
-                    MIDI 재생성(loadMidiForScore)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleResetSoundFonts}
-                    className="h-9 w-full rounded-lg border border-zinc-300 bg-white px-2 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100"
-                  >
-                    사운드폰트 메모리 초기화
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handlePrintA4}
-                    className="h-9 w-full rounded-lg border border-zinc-300 bg-white px-2 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100"
-                  >
-                    A4 인쇄 최적화
-                  </button>
-                  <label className="block text-[10px] font-medium text-zinc-500">출력 장치</label>
-                  <select
-                    value={selectedOutputDeviceId}
-                    onChange={(e) => {
-                      void handleOutputDeviceChange(e.target.value).catch((err) => {
-                        const message =
-                          err instanceof Error ? err.message : "출력 장치 변경 중 오류가 발생했습니다.";
-                        setApiErrorMessage(message);
-                      });
-                    }}
-                    className="h-9 w-full rounded-lg border border-zinc-300 bg-white px-2 text-xs text-zinc-900"
-                  >
-                    <option value="default">기본 장치</option>
-                    {outputDevices.map((d, idx) => (
-                      <option key={d.id ?? `device-${idx}`} value={d.id ?? ""}>
-                        {d.label || `장치 ${idx + 1}`}
-                      </option>
-                    ))}
-                  </select>
-                  <label className="block text-[10px] font-medium text-zinc-500">Master Volume</label>
-                  <input
-                    type="range"
-                    min={0}
-                    max={1}
-                    step={0.01}
-                    value={masterVolume}
-                    onChange={(e) => {
-                      const v = Number(e.target.value);
-                      setMasterVolume(v);
-                      if (apiRef.current) apiRef.current.masterVolume = v;
-                    }}
-                    className="w-full"
-                  />
-                  <label className="block text-[10px] font-medium text-zinc-500">Metronome Volume</label>
-                  <input
-                    type="range"
-                    min={0}
-                    max={1}
-                    step={0.01}
-                    value={metronomeVolumeRatio}
-                    onChange={(e) => {
-                      const v = Number(e.target.value);
-                      setMetronomeVolumeRatio(v);
-                      if (apiRef.current && isMetronome) apiRef.current.metronomeVolume = v;
-                    }}
-                    className="w-full"
-                  />
-                  <label className="block text-[10px] font-medium text-zinc-500">Playback Speed</label>
-                  <input
-                    type="range"
-                    min={0.5}
-                    max={1.5}
-                    step={0.05}
-                    value={playbackSpeed}
-                    onChange={(e) => {
-                      const v = Number(e.target.value);
-                      setPlaybackSpeed(v);
-                      if (apiRef.current) apiRef.current.playbackSpeed = v;
-                    }}
-                    className="w-full"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setSpeedTrainerEnabled((prev) => !prev)}
-                    className={`h-9 w-full rounded-lg border px-2 text-xs font-medium transition ${
-                      speedTrainerEnabled
-                        ? "border-emerald-500 bg-emerald-50 text-emerald-700"
-                        : "border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-100"
-                    }`}
-                  >
-                    {speedTrainerEnabled ? "속도 트레이너 ON (+5%)" : "속도 트레이너 OFF"}
-                  </button>
-                  <div className="rounded-md border border-zinc-200 bg-zinc-50 p-2 text-[10px] text-zinc-600">
-                    <p>{midiStageText}</p>
-                    <p>MIDI 이벤트 수: {midiEventCount}</p>
-                    <p>메트로놈 틱 수: {metronomeTickCount}</p>
-                    <p>midiTickShift: {Math.floor(apiRef.current?.midiTickShift ?? 0)}</p>
-                    <p>{playedBeatText}</p>
-                  </div>
-                  <label className="block text-[10px] font-medium text-zinc-500">줌</label>
-                  <select
-                    value={zoom}
-                    onChange={(e) => handleZoomChange(e.target.value)}
-                    className="h-9 w-full rounded-lg border border-zinc-300 bg-white px-2 text-xs text-zinc-900"
-                  >
-                    <option value="25">25%</option>
-                    <option value="50">50%</option>
-                    <option value="75">75%</option>
-                    <option value="90">90%</option>
-                    <option value="100">100%</option>
-                    <option value="110">110%</option>
-                    <option value="125">125%</option>
-                    <option value="150">150%</option>
-                    <option value="200">200%</option>
-                  </select>
-                  <label className="block text-[10px] font-medium text-zinc-500">레이아웃</label>
-                  <select
-                    value={layout}
-                    onChange={(e) => handleLayoutChange(e.target.value as "page" | "horizontal")}
-                    className="h-9 w-full rounded-lg border border-zinc-300 bg-white px-2 text-xs text-zinc-900"
-                  >
-                    <option value="horizontal">Horizontal</option>
-                    <option value="page">Page</option>
-                  </select>
                 </div>
               </div>
             </div>
