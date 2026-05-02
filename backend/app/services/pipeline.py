@@ -2502,6 +2502,24 @@ def _midi_to_alphatex(
     def _snap_time_to_grid(t: float) -> float:
         return round(float(t) / step_snap) * step_snap
 
+    onset_display_sec = max(1e-6, float(_grid_step_sec))
+
+    def _display_start_for_onset(note: dict[str, Any]) -> float:
+        raw_start = float(note["start"])
+        if preset.use_grid_boundaries:
+            return round(_snap_time_to_grid(raw_start), 6)
+        return raw_start
+
+    def _display_end_for_onset(note: dict[str, Any]) -> float:
+        start = _display_start_for_onset(note)
+        raw_end = float(note.get("end", start + onset_display_sec))
+        end = min(raw_end, start + onset_display_sec)
+        if preset.use_grid_boundaries:
+            end = round(_snap_time_to_grid(end), 6)
+        if end <= start + eps:
+            end = start + onset_display_sec
+        return round(end, 6)
+
     boundaries_legacy: set[float] = {0.0, last_bar_end}
     for n in note_events:
         boundaries_legacy.add(float(n["start"]))
@@ -2515,12 +2533,9 @@ def _midi_to_alphatex(
     for bs, be, *_r in bars_info:
         boundaries.add(bs)
         boundaries.add(be)
-    if preset.use_grid_boundaries:
-        for n in note_events:
-            boundaries.add(round(_snap_time_to_grid(float(n["start"])), 6))
-    else:
-        for n in note_events:
-            boundaries.add(float(n["start"]))
+    for n in note_events:
+        boundaries.add(_display_start_for_onset(n))
+        boundaries.add(_display_end_for_onset(n))
     sorted_boundaries = uniq_sorted(list(boundaries))
     boundary_count_after = len(sorted_boundaries)
 
