@@ -6,6 +6,7 @@ TAB 렌더 모드(transcription/arrangement) 스모크.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -31,6 +32,15 @@ def _make_tiny_midi(path: Path) -> None:
     inst = pretty_midi.Instrument(program=25, is_drum=False, name="Guitar")
     inst.notes.append(pretty_midi.Note(velocity=80, pitch=64, start=0.0, end=0.5))
     inst.notes.append(pretty_midi.Note(velocity=78, pitch=67, start=0.5, end=1.0))
+    pm.instruments.append(inst)
+    pm.write(str(path))
+
+
+def _make_sparse_short_note_midi(path: Path) -> None:
+    pm = pretty_midi.PrettyMIDI(initial_tempo=120)
+    inst = pretty_midi.Instrument(program=25, is_drum=False, name="Guitar")
+    inst.notes.append(pretty_midi.Note(velocity=80, pitch=64, start=0.0, end=0.125))
+    inst.notes.append(pretty_midi.Note(velocity=78, pitch=67, start=1.0, end=1.125))
     pm.instruments.append(inst)
     pm.write(str(path))
 
@@ -77,6 +87,31 @@ def _run_case(name: str, env_updates: dict[str, str], *, mode: str) -> dict:
     return out
 
 
+def _run_sparse_short_note_regression() -> None:
+    _clear_tab_env()
+    with tempfile.TemporaryDirectory() as td:
+        mid = Path(td) / "short-sparse.mid"
+        _make_sparse_short_note_midi(mid)
+        tex = _render_transcription_alphatex(
+            mid,
+            title="short-sparse",
+            artist="",
+            lyrics=None,
+            audio_duration_sec=None,
+            capo=0,
+            tempo_override=120.0,
+            onset_times_sec=None,
+            tab_output_dir=None,
+            tab_experiment_out={},
+        )
+    body = tex.split("\\tempo 120", 1)[1].split("\\sync", 1)[0]
+    note_matches = list(re.finditer(r"(?<![\w])\d+\.\d+(?![\w])", body))
+    assert len(note_matches) == 2, tex
+    between_onsets = body[note_matches[0].end() : note_matches[1].start()]
+    assert " r" in between_onsets, tex
+    print("[ok] sparse short note onsets are not stretched")
+
+
 def main() -> None:
     _run_case("transcription_default", {}, mode="transcription")
     arrangement_out = _run_case(
@@ -88,6 +123,7 @@ def main() -> None:
         mode="arrangement",
     )
     assert arrangement_out.get("alphatex_rhythm_mode") == "arrangement_eighth"
+    _run_sparse_short_note_regression()
     _clear_tab_env()
     print("tab render mode smoke: all passed")
 
