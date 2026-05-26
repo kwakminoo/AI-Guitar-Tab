@@ -349,6 +349,8 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
   const [isPlaying, setIsPlaying] = useState(false);
   const [songPosition, setSongPosition] = useState("00:00 / 00:00");
   const [remainingTime, setRemainingTime] = useState("--:--");
+  const [totalTimeText, setTotalTimeText] = useState("--:--");
+  const [totalTickText, setTotalTickText] = useState("0");
   const [playerProgress, setPlayerProgress] = useState("0%");
   const [isCountIn, setIsCountIn] = useState(false);
   const [isMetronome, setIsMetronome] = useState(false);
@@ -373,7 +375,8 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
 
   useEffect(() => {
     if (!songLyrics?.trim() && scorePanelMode === "lyrics") {
-      setScorePanelMode("tab");
+      const id = window.setTimeout(() => setScorePanelMode("tab"), 0);
+      return () => window.clearTimeout(id);
     }
   }, [scorePanelMode, songLyrics]);
 
@@ -453,9 +456,20 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
     if (!mainRef.current) return;
 
     let disposed = false;
+    const hideLoadingOverlay = () => {
+      if (overlayRef.current) overlayRef.current.style.display = "none";
+    };
+    hideLoadingOverlay();
     mainRef.current.innerHTML = "";
     trackListRef.current?.replaceChildren();
     previousSecondRef.current = -1;
+
+    if (scorePanelMode === "lyrics") {
+      return () => {
+        disposed = true;
+        hideLoadingOverlay();
+      };
+    }
 
     if (scorePanelMode !== "test" && !hasBackendAlphaTex && !scoreForRendering) return;
 
@@ -641,10 +655,14 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
         markActiveTracks();
         const totalMs = api.endTime ?? 0;
         if (totalMs > 0) {
-          setRemainingTime(formatDurationMs(totalMs));
+          const totalText = formatDurationMs(totalMs);
+          setRemainingTime(totalText);
+          setTotalTimeText(totalText);
         } else {
           setRemainingTime("--:--");
+          setTotalTimeText("--:--");
         }
+        setTotalTickText(String(Math.floor(api.endTick ?? 0)));
       });
 
       api.renderStarted.on(() => {
@@ -654,7 +672,7 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
       });
 
       api.renderFinished.on(() => {
-        if (overlayRef.current) overlayRef.current.style.display = "none";
+        hideLoadingOverlay();
         setRenderStageText("렌더 엔진 완료");
       });
       api.postRenderFinished?.on(() => {
@@ -707,6 +725,7 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
       }
 
       api.error?.on((error) => {
+        hideLoadingOverlay();
         const message = error instanceof Error ? error.message : "재생/렌더 처리 중 오류가 발생했습니다.";
         const anyErr = error as unknown as { type?: unknown };
         const errorType = anyErr?.type;
@@ -835,12 +854,14 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
             }
           }, 1200);
         } catch (e) {
+          hideLoadingOverlay();
           const msg = e instanceof Error ? e.message : "AlphaTab 렌더 실패";
           setRenderError(msg);
           console.error(e);
         }
       });
     })().catch((e) => {
+      hideLoadingOverlay();
       const msg = e instanceof Error ? e.message : "AlphaTab 초기화 실패";
       setRenderError(msg);
       setIsPlaying(false);
@@ -849,6 +870,7 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
 
     return () => {
       disposed = true;
+      hideLoadingOverlay();
       apiRef.current?.destroy();
       apiRef.current = null;
     };
@@ -1036,8 +1058,8 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
                     {apiErrorMessage ? <p className="text-red-600">오류: {apiErrorMessage}</p> : null}
                     <p>렌더 상태: {renderStageText}</p>
                     <p>플레이어 상태: {playerStateText}</p>
-                    <p>총 길이: {apiRef.current?.endTime ? formatDurationMs(apiRef.current.endTime) : "--:--"}</p>
-                    <p>총 Tick: {Math.floor(apiRef.current?.endTick ?? 0)}</p>
+                    <p>총 길이: {totalTimeText}</p>
+                    <p>총 Tick: {totalTickText}</p>
                   </div>
                 </div>
               </div>
