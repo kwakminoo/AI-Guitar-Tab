@@ -349,6 +349,8 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
   const [isPlaying, setIsPlaying] = useState(false);
   const [songPosition, setSongPosition] = useState("00:00 / 00:00");
   const [remainingTime, setRemainingTime] = useState("--:--");
+  const [totalTimeText, setTotalTimeText] = useState("--:--");
+  const [totalTickText, setTotalTickText] = useState("0");
   const [playerProgress, setPlayerProgress] = useState("0%");
   const [isCountIn, setIsCountIn] = useState(false);
   const [isMetronome, setIsMetronome] = useState(false);
@@ -653,10 +655,14 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
         markActiveTracks();
         const totalMs = api.endTime ?? 0;
         if (totalMs > 0) {
-          setRemainingTime(formatDurationMs(totalMs));
+          const totalText = formatDurationMs(totalMs);
+          setRemainingTime(totalText);
+          setTotalTimeText(totalText);
         } else {
           setRemainingTime("--:--");
+          setTotalTimeText("--:--");
         }
+        setTotalTickText(String(Math.floor(api.endTick ?? 0)));
       });
 
       api.renderStarted.on(() => {
@@ -1052,8 +1058,8 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
                     {apiErrorMessage ? <p className="text-red-600">오류: {apiErrorMessage}</p> : null}
                     <p>렌더 상태: {renderStageText}</p>
                     <p>플레이어 상태: {playerStateText}</p>
-                    <p>총 길이: {apiRef.current?.endTime ? formatDurationMs(apiRef.current.endTime) : "--:--"}</p>
-                    <p>총 Tick: {Math.floor(apiRef.current?.endTick ?? 0)}</p>
+                    <p>총 길이: {totalTimeText}</p>
+                    <p>총 Tick: {totalTickText}</p>
                   </div>
                 </div>
               </div>
