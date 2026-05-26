@@ -453,9 +453,21 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
     if (!mainRef.current) return;
 
     let disposed = false;
+    const hideLoadingOverlay = () => {
+      if (overlayRef.current) overlayRef.current.style.display = "none";
+    };
+    hideLoadingOverlay();
     mainRef.current.innerHTML = "";
     trackListRef.current?.replaceChildren();
     previousSecondRef.current = -1;
+
+    if (scorePanelMode === "lyrics") {
+      setRenderStageText("가사 보기");
+      return () => {
+        disposed = true;
+        hideLoadingOverlay();
+      };
+    }
 
     if (scorePanelMode !== "test" && !hasBackendAlphaTex && !scoreForRendering) return;
 
@@ -654,7 +666,7 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
       });
 
       api.renderFinished.on(() => {
-        if (overlayRef.current) overlayRef.current.style.display = "none";
+        hideLoadingOverlay();
         setRenderStageText("렌더 엔진 완료");
       });
       api.postRenderFinished?.on(() => {
@@ -707,6 +719,7 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
       }
 
       api.error?.on((error) => {
+        hideLoadingOverlay();
         const message = error instanceof Error ? error.message : "재생/렌더 처리 중 오류가 발생했습니다.";
         const anyErr = error as unknown as { type?: unknown };
         const errorType = anyErr?.type;
@@ -835,12 +848,14 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
             }
           }, 1200);
         } catch (e) {
+          hideLoadingOverlay();
           const msg = e instanceof Error ? e.message : "AlphaTab 렌더 실패";
           setRenderError(msg);
           console.error(e);
         }
       });
     })().catch((e) => {
+      hideLoadingOverlay();
       const msg = e instanceof Error ? e.message : "AlphaTab 초기화 실패";
       setRenderError(msg);
       setIsPlaying(false);
@@ -849,6 +864,7 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
 
     return () => {
       disposed = true;
+      hideLoadingOverlay();
       apiRef.current?.destroy();
       apiRef.current = null;
     };

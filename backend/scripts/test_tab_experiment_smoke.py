@@ -17,7 +17,11 @@ _BACKEND = Path(__file__).resolve().parents[1]
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
-from app.services.pipeline import _render_arrangement_alphatex, _render_transcription_alphatex  # noqa: E402
+from app.services.pipeline import (  # noqa: E402
+    _render_arrangement_alphatex,
+    _render_transcription_alphatex,
+    _select_midi_source_stem,
+)
 
 
 def _clear_tab_env() -> None:
@@ -33,6 +37,30 @@ def _make_tiny_midi(path: Path) -> None:
     inst.notes.append(pretty_midi.Note(velocity=78, pitch=67, start=0.5, end=1.0))
     pm.instruments.append(inst)
     pm.write(str(path))
+
+
+def _run_stem_source_case() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        stems_root = root / "stems"
+        stems_root.mkdir()
+        mix = root / "source.mp3"
+        other = stems_root / "other.mp3"
+        mix.write_bytes(b"mix")
+        other.write_bytes(b"other")
+
+        selected_source, selected_path, reason = _select_midi_source_stem(
+            {"other": other},
+            stems_root,
+            mix,
+            {"is_playable_source": False},
+            {"is_playable_source": False},
+        )
+
+        assert selected_source == "other"
+        assert selected_path == other
+        assert "other stem fallback" in reason
+    print("[ok] stem_source_other_fallback")
 
 
 def _run_case(name: str, env_updates: dict[str, str], *, mode: str) -> dict:
@@ -78,6 +106,7 @@ def _run_case(name: str, env_updates: dict[str, str], *, mode: str) -> dict:
 
 
 def main() -> None:
+    _run_stem_source_case()
     _run_case("transcription_default", {}, mode="transcription")
     arrangement_out = _run_case(
         "arrangement_mode",
