@@ -375,7 +375,8 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
 
   useEffect(() => {
     if (!songLyrics?.trim() && scorePanelMode === "lyrics") {
-      setScorePanelMode("tab");
+      const id = window.setTimeout(() => setScorePanelMode("tab"), 0);
+      return () => window.clearTimeout(id);
     }
   }, [scorePanelMode, songLyrics]);
 
@@ -464,7 +465,6 @@ export const ScoreViewer: React.FC<ScoreViewerProps> = ({
     previousSecondRef.current = -1;
 
     if (scorePanelMode === "lyrics") {
-      setRenderStageText("가사 보기");
       return () => {
         disposed = true;
         hideLoadingOverlay();
