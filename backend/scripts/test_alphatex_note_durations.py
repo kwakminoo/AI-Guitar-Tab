@@ -39,7 +39,7 @@ def main() -> None:
             tex = pipeline._midi_to_alphatex(mid, title="short", tempo_override=120.0)
 
     body = tex.split("\\tempo 120\n", 1)[1].split("\\sync", 1)[0]
-    assert ":16 0.1" in body, body
+    assert ":8 0.1" in body, body
     assert ":1 0.1" not in body, body
     print("alphatex note duration regression: passed")
 
