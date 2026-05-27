@@ -2518,9 +2518,11 @@ def _midi_to_alphatex(
     if preset.use_grid_boundaries:
         for n in note_events:
             boundaries.add(round(_snap_time_to_grid(float(n["start"])), 6))
+            boundaries.add(round(_snap_time_to_grid(float(n["end"])), 6))
     else:
         for n in note_events:
             boundaries.add(float(n["start"]))
+            boundaries.add(float(n["end"]))
     sorted_boundaries = uniq_sorted(list(boundaries))
     boundary_count_after = len(sorted_boundaries)
 
