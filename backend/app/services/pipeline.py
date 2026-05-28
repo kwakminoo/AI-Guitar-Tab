@@ -1782,21 +1782,23 @@ def _enrich_raw_notes_with_tab_hints(
             n["string"], n["fret"] = tab[0], tab[1]
 
 
-def _midi_note_to_string_fret(midi_pitch: int) -> tuple[int, int]:
+def _midi_note_to_string_fret(midi_pitch: int, capo: int = 0) -> tuple[int, int]:
     # 가장 낮은 프렛 우선 매핑
-    best = (6, max(0, midi_pitch - GUITAR_OPEN_MIDI[-1]))
+    capo = _clamp_capo_0_5(capo)
+    best = (6, max(0, midi_pitch - GUITAR_OPEN_MIDI[-1] - capo))
     for string_idx, open_pitch in enumerate(GUITAR_OPEN_MIDI, start=1):
-        fret = midi_pitch - open_pitch
+        fret = midi_pitch - open_pitch - capo
         if 0 <= fret <= 24:
             if fret < best[1]:
                 best = (string_idx, fret)
     return best
 
 
-def _midi_pitch_to_candidate_positions(midi_pitch: int) -> list[tuple[int, int]]:
+def _midi_pitch_to_candidate_positions(midi_pitch: int, capo: int = 0) -> list[tuple[int, int]]:
+    capo = _clamp_capo_0_5(capo)
     candidates: list[tuple[int, int]] = []
     for string_idx, open_pitch in enumerate(GUITAR_OPEN_MIDI, start=1):
-        fret = midi_pitch - open_pitch
+        fret = midi_pitch - open_pitch - capo
         if 0 <= fret <= 24:
             candidates.append((string_idx, int(fret)))
     return candidates
@@ -1977,6 +1979,7 @@ def _quantized_beats_from_midi(
     MIDI note start/end를 기본 양자화하고 모드 preset에 따라 격자 해상도를 적용한다.
     """
 
+    capo_clamped = _clamp_capo_0_5(capo)
     quarter = 60.0 / max(1.0, tempo)
     step_16 = quarter / 4.0  # 1/16
     step_32 = step_16 / 2.0  # 1/32
@@ -2099,9 +2102,9 @@ def _quantized_beats_from_midi(
             lead_candidates[k] = [(int(lead["string"]), int(lead["fret"]))]
             continue
         lead_pitch = lead["pitch"]
-        cand = _midi_pitch_to_candidate_positions(lead_pitch)
+        cand = _midi_pitch_to_candidate_positions(lead_pitch, capo_clamped)
         if not cand:
-            cand = [_midi_note_to_string_fret(lead_pitch)]
+            cand = [_midi_note_to_string_fret(lead_pitch, capo_clamped)]
         lead_candidates[k] = cand
 
     # Viterbi DP: 각 slot의 lead pos를 선택한다.
@@ -2141,7 +2144,7 @@ def _quantized_beats_from_midi(
             bar_label=bar_label_0,
             chord_pcs=chord_pcs_0,
             shape=shape_0,
-            capo=capo,
+            capo=capo_clamped,
             use_v2=use_v2,
             prev_meta=slot_leads[first_k],
             note_meta=slot_leads[first_k],
@@ -2167,7 +2170,7 @@ def _quantized_beats_from_midi(
                     bar_label=bar_label_k,
                     chord_pcs=chord_pcs_k,
                     shape=shape_k,
-                    capo=capo,
+                    capo=capo_clamped,
                     use_v2=use_v2,
                     prev_meta=prev_meta,
                     note_meta=next_meta,
@@ -2200,7 +2203,6 @@ def _quantized_beats_from_midi(
     if first_slot_time > 0:
         beats.append({"time": 0.0, "chord": None, "lyric": None, "notes": []})
 
-    capo_clamped = _clamp_capo_0_5(capo)
     bar_idx_cache = 0
     chord_hits = 0
     shape_hits = 0
@@ -2260,9 +2262,9 @@ def _quantized_beats_from_midi(
                         shape_hits += 1
                 continue
 
-            candidates = _midi_pitch_to_candidate_positions(n["pitch"])
+            candidates = _midi_pitch_to_candidate_positions(n["pitch"], capo_clamped)
             if not candidates:
-                candidates = [_midi_note_to_string_fret(n["pitch"])]
+                candidates = [_midi_note_to_string_fret(n["pitch"], capo_clamped)]
             best_pos = candidates[0]
             best_cost = float("inf")
             best_detail = {"pitch_error": 0.0, "chord_tone_hit": 0.0, "shape_alignment_hit": 0.0}
@@ -2414,7 +2416,7 @@ def _midi_to_alphatex(
 
     if note_events:
         note_events, _ref_passes = refine_note_events_with_reference_midi(
-            note_events, midi_path, max_passes=2
+            note_events, midi_path, max_passes=2, capo=capo
         )
 
     base_den = preset.base_den
@@ -2728,7 +2730,7 @@ def _midi_to_alphatex(
             if tab_output_dir is not None and note_events:
                 try:
                     write_tab_compare_artifacts(
-                        midi_path, note_events, tab_output_dir, refine=False
+                        midi_path, note_events, tab_output_dir, refine=False, capo=capo
                     )
                 except OSError:
                     pass

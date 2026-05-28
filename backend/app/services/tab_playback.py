@@ -12,22 +12,23 @@ GUITAR_MIN_PITCH = 40
 GUITAR_MAX_PITCH = 88
 
 
-def string_fret_to_midi_pitch(string_idx: int, fret: int) -> int:
+def string_fret_to_midi_pitch(string_idx: int, fret: int, *, capo: int = 0) -> int:
     if string_idx < 1 or string_idx > 6:
         raise ValueError(f"string_idx는 1~6: {string_idx}")
-    return int(GUITAR_OPEN_MIDI[string_idx - 1]) + int(fret)
+    return int(GUITAR_OPEN_MIDI[string_idx - 1]) + int(fret) + int(capo)
 
 
 def note_events_to_pretty_midi(
     note_events: list[dict[str, Any]],
     *,
+    capo: int = 0,
     program: int = 25,
     instrument_name: str = "Guitar Tab Export",
 ) -> pretty_midi.PrettyMIDI:
     pm = pretty_midi.PrettyMIDI()
     inst = pretty_midi.Instrument(program=int(program) % 128, name=instrument_name, is_drum=False)
     for n in note_events:
-        pitch = string_fret_to_midi_pitch(int(n["string"]), int(n["fret"]))
+        pitch = string_fret_to_midi_pitch(int(n["string"]), int(n["fret"]), capo=capo)
         vel = max(1, min(127, int(n.get("velocity", 80))))
         st = float(n["start"])
         en = float(n["end"])
@@ -38,9 +39,11 @@ def note_events_to_pretty_midi(
     return pm
 
 
-def export_tab_note_events_to_midi(note_events: list[dict[str, Any]], out_path: Path) -> Path:
+def export_tab_note_events_to_midi(
+    note_events: list[dict[str, Any]], out_path: Path, *, capo: int = 0
+) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    note_events_to_pretty_midi(note_events).write(str(out_path))
+    note_events_to_pretty_midi(note_events, capo=capo).write(str(out_path))
     return out_path
 
 
@@ -60,6 +63,7 @@ def compare_tab_midi_to_reference(
     reference_midi_path: Path,
     tab_note_events: list[dict[str, Any]],
     *,
+    capo: int = 0,
     onset_tolerance_sec: float = 0.06,
 ) -> dict[str, Any]:
     ref = pretty_midi.PrettyMIDI(str(reference_midi_path))
@@ -70,7 +74,7 @@ def compare_tab_midi_to_reference(
         en = float(n["end"])
         if en <= st:
             continue
-        p = string_fret_to_midi_pitch(int(n["string"]), int(n["fret"]))
+        p = string_fret_to_midi_pitch(int(n["string"]), int(n["fret"]), capo=capo)
         tab_notes.append((st, p))
     tab_notes.sort(key=lambda x: (x[0], x[1]))
     tol = float(onset_tolerance_sec)
@@ -109,6 +113,7 @@ def nudge_note_events_toward_reference(
     note_events: list[dict[str, Any]],
     reference_midi_path: Path,
     *,
+    capo: int = 0,
     onset_tolerance_sec: float = 0.055,
 ) -> list[dict[str, Any]]:
     """원본과 피치·온셋이 가까우면 탭 노트 시작만 원본 온셋에 맞춘다."""
@@ -118,7 +123,7 @@ def nudge_note_events_toward_reference(
     out: list[dict[str, Any]] = []
     for n in note_events:
         cp = {**n}
-        pitch = string_fret_to_midi_pitch(int(cp["string"]), int(cp["fret"]))
+        pitch = string_fret_to_midi_pitch(int(cp["string"]), int(cp["fret"]), capo=capo)
         st = float(cp["start"])
         best: pretty_midi.Note | None = None
         best_d = tol * 10
@@ -139,6 +144,7 @@ def refine_note_events_with_reference_midi(
     note_events: list[dict[str, Any]],
     reference_midi_path: Path,
     *,
+    capo: int = 0,
     max_passes: int = 2,
     onset_tolerance_sec: float = 0.055,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -148,7 +154,7 @@ def refine_note_events_with_reference_midi(
     best_f1 = -1.0
     for i in range(max(1, int(max_passes))):
         rep = compare_tab_midi_to_reference(
-            reference_midi_path, cur, onset_tolerance_sec=onset_tolerance_sec
+            reference_midi_path, cur, capo=capo, onset_tolerance_sec=onset_tolerance_sec
         )
         f1 = float(rep["f1_onset_symmetric"])
         passes.append({"pass": i, **rep})
@@ -158,7 +164,7 @@ def refine_note_events_with_reference_midi(
         if i + 1 >= max_passes:
             break
         nxt = nudge_note_events_toward_reference(
-            cur, reference_midi_path, onset_tolerance_sec=onset_tolerance_sec
+            cur, reference_midi_path, capo=capo, onset_tolerance_sec=onset_tolerance_sec
         )
         same = len(nxt) == len(cur) and all(
             abs(float(a["start"]) - float(b["start"])) < 1e-5
@@ -176,20 +182,25 @@ def write_tab_compare_artifacts(
     tab_dir: Path,
     *,
     refine: bool = True,
+    capo: int = 0,
 ) -> dict[str, Any]:
     tab_dir.mkdir(parents=True, exist_ok=True)
     final_notes = list(note_events)
     report: dict[str, Any] = {"refine_enabled": bool(refine)}
     if refine:
         final_notes, passes = refine_note_events_with_reference_midi(
-            note_events, reference_midi_path, max_passes=2
+            note_events, reference_midi_path, max_passes=2, capo=capo
         )
         report["refine_passes"] = passes
     else:
         report["refine_passes"] = []
-    export_tab_note_events_to_midi(final_notes, tab_dir / "tab_from_tab.mid")
-    report["compare_before_refine"] = compare_tab_midi_to_reference(reference_midi_path, note_events)
-    report["compare_after_export"] = compare_tab_midi_to_reference(reference_midi_path, final_notes)
+    export_tab_note_events_to_midi(final_notes, tab_dir / "tab_from_tab.mid", capo=capo)
+    report["compare_before_refine"] = compare_tab_midi_to_reference(
+        reference_midi_path, note_events, capo=capo
+    )
+    report["compare_after_export"] = compare_tab_midi_to_reference(
+        reference_midi_path, final_notes, capo=capo
+    )
     report["note_event_count"] = len(final_notes)
     (tab_dir / "compare_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return report
