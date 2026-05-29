@@ -1190,7 +1190,7 @@ def _validate_alphatex_with_alphatab(tex: str) -> dict[str, Any]:
         node_mjs_path.write_text(
             r"""
 import fs from 'fs';
-import * as alphaTab from '@coderline/alphatab';
+import * as alphaTab from '../public/alphatab-assets/alphaTab.mjs';
 
 const { AlphaTexLexer, AlphaTexParser, AlphaTexParseMode, AlphaTexNodeType } = alphaTab.importer.alphaTex;
 
