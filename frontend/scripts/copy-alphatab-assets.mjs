@@ -29,7 +29,18 @@ function copyDir(srcDir, destDir) {
 }
 
 if (!fs.existsSync(dist)) {
+  const requiredAssets = [
+    path.join(dest, "alphaTab.mjs"),
+    path.join(dest, "font", "Bravura.woff2"),
+    path.join(dest, "soundfont", "sonivox.sf2"),
+  ];
+  const missingAssets = requiredAssets.filter((asset) => !fs.existsSync(asset));
+  if (missingAssets.length === 0) {
+    console.warn("missing vendor dist, using committed alphatab-assets:", dist);
+    process.exit(0);
+  }
   console.error("missing vendor dist:", dist);
+  console.error("missing committed assets:", missingAssets.join(", "));
   process.exit(1);
 }
 
