@@ -11,6 +11,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import types
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,62 @@ _BACKEND = Path(__file__).resolve().parents[1]
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
+
+def _install_import_stubs() -> None:
+    """Load app.main without requiring the full backend runtime stack."""
+
+    fastapi = types.ModuleType("fastapi")
+
+    class FastAPI:
+        def __init__(self, *_: Any, **__: Any) -> None:
+            pass
+
+        def add_middleware(self, *_: Any, **__: Any) -> None:
+            pass
+
+        def get(self, *_: Any, **__: Any) -> Any:
+            return lambda fn: fn
+
+        def post(self, *_: Any, **__: Any) -> Any:
+            return lambda fn: fn
+
+    class HTTPException(Exception):
+        def __init__(self, status_code: int, detail: str) -> None:
+            super().__init__(detail)
+            self.status_code = status_code
+            self.detail = detail
+
+    fastapi.FastAPI = FastAPI
+    fastapi.File = lambda *_, **__: None
+    fastapi.HTTPException = HTTPException
+    fastapi.UploadFile = object
+    sys.modules.setdefault("fastapi", fastapi)
+
+    middleware = types.ModuleType("fastapi.middleware")
+    cors = types.ModuleType("fastapi.middleware.cors")
+    cors.CORSMiddleware = object
+    sys.modules.setdefault("fastapi.middleware", middleware)
+    sys.modules.setdefault("fastapi.middleware.cors", cors)
+
+    pydantic = types.ModuleType("pydantic")
+
+    class BaseModel:
+        def __init__(self, **kwargs: Any) -> None:
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+    pydantic.BaseModel = BaseModel
+    pydantic.HttpUrl = str
+    sys.modules.setdefault("pydantic", pydantic)
+
+    pipeline = types.ModuleType("app.services.pipeline")
+    pipeline._midi_to_alphatex = lambda *_args, **_kwargs: ""
+    pipeline._midi_to_score = lambda *_args, **_kwargs: {}
+    pipeline.run_four_step_pipeline = lambda *_args, **_kwargs: None
+    sys.modules.setdefault("app.services.pipeline", pipeline)
+
+
+_install_import_stubs()
 import app.main as backend_main  # noqa: E402
 
 
@@ -74,7 +131,10 @@ def main() -> None:
             assert score_paths[0].parent != score_paths[1].parent
             assert score_paths[0].read_bytes() == b"first"
             assert score_paths[1].read_bytes() == b"second"
-            assert alphatex_calls[0]["tab_output_dir"] != alphatex_calls[1]["tab_output_dir"]
+            assert (
+                alphatex_calls[0]["tab_output_dir"]
+                != alphatex_calls[1]["tab_output_dir"]
+            )
     finally:
         os.chdir(original_cwd)
         backend_main._midi_to_score = original_score
