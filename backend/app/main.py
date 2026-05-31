@@ -1,5 +1,6 @@
 import asyncio
 import json
+import uuid
 from urllib.parse import urlparse
 from pathlib import Path
 from typing import Any
@@ -174,11 +175,13 @@ async def midi_tab_preview(file: UploadFile = File(...)) -> MidiTabPreviewRespon
 
         uploads_dir = Path("data") / "uploads"
         uploads_dir.mkdir(parents=True, exist_ok=True)
-        midi_path = uploads_dir / filename
+        request_dir = uploads_dir / "midi_preview" / f"{Path(filename).stem}-{uuid.uuid4().hex}"
+        request_dir.mkdir(parents=True, exist_ok=True)
+        midi_path = request_dir / filename
         midi_path.write_bytes(data)
 
         title = Path(filename).stem or "Uploaded MIDI"
-        tab_q_dir = uploads_dir / "tab_preview" / Path(filename).stem
+        tab_q_dir = request_dir / "tab_preview"
         tab_q_dir.mkdir(parents=True, exist_ok=True)
         score = _midi_to_score(midi_path, title=title, capo=0)
         alphatex = _midi_to_alphatex(
