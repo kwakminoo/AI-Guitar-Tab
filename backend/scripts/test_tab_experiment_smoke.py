@@ -35,6 +35,14 @@ def _make_tiny_midi(path: Path) -> None:
     pm.write(str(path))
 
 
+def _make_short_note_midi(path: Path) -> None:
+    pm = pretty_midi.PrettyMIDI(initial_tempo=120)
+    inst = pretty_midi.Instrument(program=25, is_drum=False, name="Guitar")
+    inst.notes.append(pretty_midi.Note(velocity=80, pitch=64, start=0.5, end=0.625))
+    pm.instruments.append(inst)
+    pm.write(str(path))
+
+
 def _run_case(name: str, env_updates: dict[str, str], *, mode: str) -> dict:
     _clear_tab_env()
     for k, v in env_updates.items():
@@ -77,8 +85,32 @@ def _run_case(name: str, env_updates: dict[str, str], *, mode: str) -> dict:
     return out
 
 
+def _assert_short_note_end_boundary() -> None:
+    _clear_tab_env()
+    with tempfile.TemporaryDirectory() as td:
+        mid = Path(td) / "short-note.mid"
+        _make_short_note_midi(mid)
+        out: dict = {}
+        tex = _render_transcription_alphatex(
+            mid,
+            title="short-note",
+            artist="",
+            lyrics=None,
+            audio_duration_sec=None,
+            capo=0,
+            tempo_override=120.0,
+            onset_times_sec=None,
+            tab_output_dir=None,
+            tab_experiment_out=out,
+        )
+        assert "\\title" in tex
+        assert out.get("boundary_count_after") == out.get("boundary_count_before")
+    print("[ok] short_note_end_boundary")
+
+
 def main() -> None:
     _run_case("transcription_default", {}, mode="transcription")
+    _assert_short_note_end_boundary()
     arrangement_out = _run_case(
         "arrangement_mode",
         {
