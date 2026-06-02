@@ -1180,6 +1180,10 @@ def _validate_alphatex_with_alphatab(tex: str) -> dict[str, Any]:
 
     tmp_root = frontend_dir / ".tmp-alphatex-validator"
     tmp_root.mkdir(parents=True, exist_ok=True)
+    alphatab_module_path = frontend_dir / "public" / "alphatab-assets" / "alphaTab.mjs"
+    if not alphatab_module_path.is_file():
+        raise RuntimeError(f"alphaTab ESM 자산을 찾을 수 없습니다: {alphatab_module_path}")
+    alphatab_module_url = alphatab_module_path.resolve().as_uri()
     nonce = uuid.uuid4().hex
     tex_path = tmp_root / f"input-{nonce}.alphatex"
     node_mjs_path = tmp_root / f"validate-{nonce}.mjs"
@@ -1188,10 +1192,10 @@ def _validate_alphatex_with_alphatab(tex: str) -> dict[str, Any]:
         tex_path.write_text(tex, encoding="utf-8")
 
         node_mjs_path.write_text(
-            r"""
-import fs from 'fs';
-import * as alphaTab from '@coderline/alphatab';
-
+            (
+                "import fs from 'fs';\n"
+                f"import * as alphaTab from {json.dumps(alphatab_module_url)};\n"
+                + r"""
 const { AlphaTexLexer, AlphaTexParser, AlphaTexParseMode, AlphaTexNodeType } = alphaTab.importer.alphaTex;
 
 const inputPath = process.argv[2];
@@ -1374,7 +1378,8 @@ console.log(JSON.stringify({
   astIssues,
   astWarnings
 }));
-""",
+"""
+            ),
             encoding="utf-8",
         )
 
