@@ -12,7 +12,6 @@
     "tab:learn": "node scripts/tab-learn.mjs"
   },
   "dependencies": {
-    "@coderline/alphatab": "file:../vendor/alphaTab/packages/alphatab",
     "next": "16.1.7",
     "react": "19.2.3",
     "react-dom": "19.2.3"
