@@ -11,6 +11,7 @@ const frontendRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(frontendRoot, "..");
 const dist = path.join(repoRoot, "vendor", "alphaTab", "packages", "alphatab", "dist");
 const dest = path.join(frontendRoot, "public", "alphatab-assets");
+const committedEntry = path.join(dest, "alphaTab.mjs");
 
 function copyFile(src, dst) {
   fs.mkdirSync(path.dirname(dst), { recursive: true });
@@ -29,7 +30,11 @@ function copyDir(srcDir, destDir) {
 }
 
 if (!fs.existsSync(dist)) {
-  console.error("missing vendor dist:", dist);
+  if (fs.existsSync(committedEntry)) {
+    console.log("alphatab-assets already present; vendor dist not found:", dist);
+    process.exit(0);
+  }
+  console.error("missing vendor dist and committed alphaTab asset:", dist);
   process.exit(1);
 }
 
