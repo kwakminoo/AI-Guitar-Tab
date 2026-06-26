@@ -1772,6 +1772,8 @@ def _match_tab_hint_for_note(
 def _enrich_raw_notes_with_tab_hints(
     notes: list[dict[str, Any]],
     hints: list[dict[str, Any]] | None,
+    *,
+    capo: int = 0,
 ) -> None:
     """Omnizart·사이드카 등에서 온 줄·프렛을 raw 노트에 붙인다(있을 때만)."""
     if not hints:
@@ -1779,24 +1781,31 @@ def _enrich_raw_notes_with_tab_hints(
     for n in notes:
         tab = _match_tab_hint_for_note(n, hints)
         if tab:
-            n["string"], n["fret"] = tab[0], tab[1]
+            string_no = int(tab[0])
+            if string_no < 1 or string_no > 6:
+                continue
+            fret = int(int(n["pitch"]) - _clamp_capo_0_5(capo) - GUITAR_OPEN_MIDI[string_no - 1])
+            if 0 <= fret <= 24:
+                n["string"], n["fret"] = string_no, fret
 
 
-def _midi_note_to_string_fret(midi_pitch: int) -> tuple[int, int]:
+def _midi_note_to_string_fret(midi_pitch: int, capo: int = 0) -> tuple[int, int]:
     # 가장 낮은 프렛 우선 매핑
-    best = (6, max(0, midi_pitch - GUITAR_OPEN_MIDI[-1]))
+    capo = _clamp_capo_0_5(capo)
+    best = (6, max(0, midi_pitch - capo - GUITAR_OPEN_MIDI[-1]))
     for string_idx, open_pitch in enumerate(GUITAR_OPEN_MIDI, start=1):
-        fret = midi_pitch - open_pitch
+        fret = midi_pitch - capo - open_pitch
         if 0 <= fret <= 24:
             if fret < best[1]:
                 best = (string_idx, fret)
     return best
 
 
-def _midi_pitch_to_candidate_positions(midi_pitch: int) -> list[tuple[int, int]]:
+def _midi_pitch_to_candidate_positions(midi_pitch: int, capo: int = 0) -> list[tuple[int, int]]:
     candidates: list[tuple[int, int]] = []
+    capo = _clamp_capo_0_5(capo)
     for string_idx, open_pitch in enumerate(GUITAR_OPEN_MIDI, start=1):
-        fret = midi_pitch - open_pitch
+        fret = midi_pitch - capo - open_pitch
         if 0 <= fret <= 24:
             candidates.append((string_idx, int(fret)))
     return candidates
@@ -2015,7 +2024,7 @@ def _quantized_beats_from_midi(
         stats_out=onset_stats_out,
     )
 
-    _enrich_raw_notes_with_tab_hints(candidate_raw_notes, tab_hints)
+    _enrich_raw_notes_with_tab_hints(candidate_raw_notes, tab_hints, capo=capo)
 
     if not candidate_raw_notes:
         # 파서가 무조건 구조를 기대하므로 더미 비트 1개는 남긴다.
@@ -2099,9 +2108,9 @@ def _quantized_beats_from_midi(
             lead_candidates[k] = [(int(lead["string"]), int(lead["fret"]))]
             continue
         lead_pitch = lead["pitch"]
-        cand = _midi_pitch_to_candidate_positions(lead_pitch)
+        cand = _midi_pitch_to_candidate_positions(lead_pitch, capo)
         if not cand:
-            cand = [_midi_note_to_string_fret(lead_pitch)]
+            cand = [_midi_note_to_string_fret(lead_pitch, capo)]
         lead_candidates[k] = cand
 
     # Viterbi DP: 각 slot의 lead pos를 선택한다.
@@ -2260,9 +2269,9 @@ def _quantized_beats_from_midi(
                         shape_hits += 1
                 continue
 
-            candidates = _midi_pitch_to_candidate_positions(n["pitch"])
+            candidates = _midi_pitch_to_candidate_positions(n["pitch"], capo_clamped)
             if not candidates:
-                candidates = [_midi_note_to_string_fret(n["pitch"])]
+                candidates = [_midi_note_to_string_fret(n["pitch"], capo_clamped)]
             best_pos = candidates[0]
             best_cost = float("inf")
             best_detail = {"pitch_error": 0.0, "chord_tone_hit": 0.0, "shape_alignment_hit": 0.0}
@@ -2414,7 +2423,7 @@ def _midi_to_alphatex(
 
     if note_events:
         note_events, _ref_passes = refine_note_events_with_reference_midi(
-            note_events, midi_path, max_passes=2
+            note_events, midi_path, max_passes=2, capo=capo
         )
 
     base_den = preset.base_den
@@ -2728,7 +2737,7 @@ def _midi_to_alphatex(
             if tab_output_dir is not None and note_events:
                 try:
                     write_tab_compare_artifacts(
-                        midi_path, note_events, tab_output_dir, refine=False
+                        midi_path, note_events, tab_output_dir, refine=False, capo=capo
                     )
                 except OSError:
                     pass
