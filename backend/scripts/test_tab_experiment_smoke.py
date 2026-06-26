@@ -17,7 +17,12 @@ _BACKEND = Path(__file__).resolve().parents[1]
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
-from app.services.pipeline import _render_arrangement_alphatex, _render_transcription_alphatex  # noqa: E402
+from app.services.pipeline import (  # noqa: E402
+    _midi_pitch_to_candidate_positions,
+    _render_arrangement_alphatex,
+    _render_transcription_alphatex,
+)
+from app.services.tab_playback import compare_tab_midi_to_reference, string_fret_to_midi_pitch  # noqa: E402
 
 
 def _clear_tab_env() -> None:
@@ -33,6 +38,31 @@ def _make_tiny_midi(path: Path) -> None:
     inst.notes.append(pretty_midi.Note(velocity=78, pitch=67, start=0.5, end=1.0))
     pm.instruments.append(inst)
     pm.write(str(path))
+
+
+def _assert_capo_mapping_uses_relative_frets() -> None:
+    # 카포 2에서 E4를 0.1로 내보내면 alphaTab은 F#4로 재생한다.
+    candidates = _midi_pitch_to_candidate_positions(64, capo=2)
+    assert (1, 0) not in candidates
+    assert (2, 3) in candidates
+    assert string_fret_to_midi_pitch(2, 3, capo=2) == 64
+
+
+def _assert_capo_compare_uses_sounding_pitch() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        mid = Path(td) / "capo.mid"
+        pm = pretty_midi.PrettyMIDI(initial_tempo=120)
+        inst = pretty_midi.Instrument(program=25, is_drum=False, name="Guitar")
+        inst.notes.append(pretty_midi.Note(velocity=80, pitch=64, start=0.0, end=0.5))
+        pm.instruments.append(inst)
+        pm.write(str(mid))
+
+        report = compare_tab_midi_to_reference(
+            mid,
+            [{"string": 2, "fret": 3, "start": 0.0, "end": 0.5, "velocity": 80}],
+            capo=2,
+        )
+        assert report["pitch_onset_recall_rate"] == 1.0
 
 
 def _run_case(name: str, env_updates: dict[str, str], *, mode: str) -> dict:
@@ -78,6 +108,8 @@ def _run_case(name: str, env_updates: dict[str, str], *, mode: str) -> dict:
 
 
 def main() -> None:
+    _assert_capo_mapping_uses_relative_frets()
+    _assert_capo_compare_uses_sounding_pitch()
     _run_case("transcription_default", {}, mode="transcription")
     arrangement_out = _run_case(
         "arrangement_mode",
