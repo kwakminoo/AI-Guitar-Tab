@@ -1595,7 +1595,9 @@ def _ensure_flat_guitar_stem_mp3(stems: dict[str, Path], stems_root: Path) -> Pa
     `guitar` 스템이 있으면 그대로 사용하고, 없으면(4스템 모델 등) `other`를 기타 트랙으로 복사한다.
     Basic Pitch·onset 전처리는 항상 `stems/guitar.mp3`를 가리키게 한다.
     """
-    src = stems.get("guitar") or stems.get("other")
+    src = stems.get("guitar")
+    if not src or not src.is_file():
+        src = stems.get("other")
     if not src or not src.is_file():
         raise RuntimeError("Demucs 출력에서 guitar/other stem을 찾지 못했습니다.")
     stems_root.mkdir(parents=True, exist_ok=True)
@@ -1714,6 +1716,71 @@ def _analyze_stem_quality(audio_path: Path) -> dict[str, Any]:
     except Exception as exc:
         out["analysis_error"] = str(exc)
         return out
+
+
+@dataclass(frozen=True)
+class MidiSourceStemSelection:
+    selected_source: str
+    selected_stem_mp3: Path
+    midi_source_reason: str
+    guitar_quality: dict[str, Any]
+    piano_quality: dict[str, Any]
+
+
+def _missing_stem_quality(stem_name: str) -> dict[str, Any]:
+    return {
+        "exists": False,
+        "is_playable_source": False,
+        "analysis_error": f"missing_{stem_name}_stem",
+    }
+
+
+def _first_existing_stem(stems: dict[str, Path], names: tuple[str, ...]) -> tuple[str | None, Path | None]:
+    for name in names:
+        path = stems.get(name)
+        if path and path.is_file():
+            return name, path
+    return None, None
+
+
+def _select_midi_source_stem(stems: dict[str, Path], stems_root: Path, mix_mp3: Path) -> MidiSourceStemSelection:
+    guitar_source_name, guitar_stem_mp3 = _first_existing_stem(stems, ("guitar", "other"))
+    _piano_source_name, piano_stem_mp3 = _first_existing_stem(stems, ("piano",))
+    guitar_quality = (
+        _analyze_stem_quality(guitar_stem_mp3)
+        if guitar_stem_mp3
+        else _missing_stem_quality("guitar_or_other")
+    )
+    piano_quality = _analyze_stem_quality(piano_stem_mp3) if piano_stem_mp3 else _missing_stem_quality("piano")
+
+    if bool(guitar_quality.get("is_playable_source")) and guitar_stem_mp3 and guitar_stem_mp3.is_file():
+        midi_source_reason = (
+            "guitar stem 품질 통과"
+            if guitar_source_name == "guitar"
+            else "guitar 누락 + other stem 품질 통과"
+        )
+        return MidiSourceStemSelection(
+            selected_source="guitar",
+            selected_stem_mp3=_ensure_flat_guitar_stem_mp3(stems, stems_root),
+            midi_source_reason=midi_source_reason,
+            guitar_quality=guitar_quality,
+            piano_quality=piano_quality,
+        )
+    if bool(piano_quality.get("is_playable_source")) and piano_stem_mp3 and piano_stem_mp3.is_file():
+        return MidiSourceStemSelection(
+            selected_source="piano",
+            selected_stem_mp3=_ensure_flat_target_stem_mp3(stems, stems_root, "piano"),
+            midi_source_reason="guitar 무효 + piano stem 품질 통과",
+            guitar_quality=guitar_quality,
+            piano_quality=piano_quality,
+        )
+    return MidiSourceStemSelection(
+        selected_source="fallback",
+        selected_stem_mp3=mix_mp3,
+        midi_source_reason="guitar/other/piano 모두 무효 또는 누락 -> mix(source.mp3) fallback",
+        guitar_quality=guitar_quality,
+        piano_quality=piano_quality,
+    )
 
 
 def _basic_pitch_to_midi(guitar_audio: Path, midi_out: Path) -> Path:
@@ -2985,18 +3052,9 @@ def run_four_step_pipeline(
     report(25, "separate", "Demucs로 stem 분리 시작")
     stems = _separate_demucs(mp3_path, job_dir / "stems")
     stems_root = job_dir / "stems"
-    guitar_stem_mp3 = stems.get("guitar")
-    piano_stem_mp3 = stems.get("piano")
-    guitar_quality = _analyze_stem_quality(guitar_stem_mp3) if guitar_stem_mp3 else {
-        "exists": False,
-        "is_playable_source": False,
-        "analysis_error": "missing_guitar_stem",
-    }
-    piano_quality = _analyze_stem_quality(piano_stem_mp3) if piano_stem_mp3 else {
-        "exists": False,
-        "is_playable_source": False,
-        "analysis_error": "missing_piano_stem",
-    }
+    stem_selection = _select_midi_source_stem(stems, stems_root, mp3_path)
+    guitar_quality = stem_selection.guitar_quality
+    piano_quality = stem_selection.piano_quality
     report(
         31,
         "stem-q",
@@ -3010,19 +3068,12 @@ def run_four_step_pipeline(
         f'rms={piano_quality.get("rms_db")} onset={piano_quality.get("onset_count")}',
     )
 
-    selected_source = "fallback"
-    selected_stem_mp3 = mp3_path
-    midi_source_reason = "guitar/piano 모두 무효 또는 누락 -> mix(source.mp3) fallback"
-    if bool(guitar_quality.get("is_playable_source")) and guitar_stem_mp3 and guitar_stem_mp3.is_file():
-        selected_source = "guitar"
-        selected_stem_mp3 = _ensure_flat_target_stem_mp3(stems, stems_root, "guitar")
-        midi_source_reason = "guitar stem 품질 통과"
-    elif bool(piano_quality.get("is_playable_source")) and piano_stem_mp3 and piano_stem_mp3.is_file():
-        selected_source = "piano"
-        selected_stem_mp3 = _ensure_flat_target_stem_mp3(stems, stems_root, "piano")
-        midi_source_reason = "guitar 무효 + piano stem 품질 통과"
+    selected_source = stem_selection.selected_source
+    selected_stem_mp3 = stem_selection.selected_stem_mp3
+    midi_source_reason = stem_selection.midi_source_reason
     report(33, "source", f"MIDI 소스 선택: {selected_source} ({midi_source_reason})")
 
+    guitar_stem_mp3 = stems.get("guitar")
     if guitar_stem_mp3 and guitar_stem_mp3.is_file():
         guitar_mp3 = _ensure_flat_target_stem_mp3(stems, stems_root, "guitar")
     else:
