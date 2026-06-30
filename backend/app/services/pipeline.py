@@ -1624,6 +1624,24 @@ def _ensure_flat_target_stem_mp3(stems: dict[str, Path], stems_root: Path, targe
     return dest
 
 
+def _select_midi_source_stem(
+    stems: dict[str, Path],
+    stems_root: Path,
+    mix_mp3: Path,
+    guitar_quality: dict[str, Any],
+    piano_quality: dict[str, Any],
+) -> tuple[str, Path, str]:
+    guitar_stem_mp3 = stems.get("guitar")
+    piano_stem_mp3 = stems.get("piano")
+    if bool(guitar_quality.get("is_playable_source")) and guitar_stem_mp3 and guitar_stem_mp3.is_file():
+        return "guitar", _ensure_flat_target_stem_mp3(stems, stems_root, "guitar"), "guitar stem 품질 통과"
+    if bool(piano_quality.get("is_playable_source")) and piano_stem_mp3 and piano_stem_mp3.is_file():
+        return "piano", _ensure_flat_target_stem_mp3(stems, stems_root, "piano"), "guitar 무효 + piano stem 품질 통과"
+    if not guitar_stem_mp3 and stems.get("other") and stems["other"].is_file():
+        return "guitar", _ensure_flat_guitar_stem_mp3(stems, stems_root), "guitar/piano 누락 또는 무효 -> other stem fallback"
+    return "fallback", mix_mp3, "guitar/piano 모두 무효 또는 누락 -> mix(source.mp3) fallback"
+
+
 def _to_dbfs(amp: float, *, floor: float = -120.0) -> float:
     if not math.isfinite(amp) or amp <= 1e-12:
         return floor
@@ -3010,17 +3028,13 @@ def run_four_step_pipeline(
         f'rms={piano_quality.get("rms_db")} onset={piano_quality.get("onset_count")}',
     )
 
-    selected_source = "fallback"
-    selected_stem_mp3 = mp3_path
-    midi_source_reason = "guitar/piano 모두 무효 또는 누락 -> mix(source.mp3) fallback"
-    if bool(guitar_quality.get("is_playable_source")) and guitar_stem_mp3 and guitar_stem_mp3.is_file():
-        selected_source = "guitar"
-        selected_stem_mp3 = _ensure_flat_target_stem_mp3(stems, stems_root, "guitar")
-        midi_source_reason = "guitar stem 품질 통과"
-    elif bool(piano_quality.get("is_playable_source")) and piano_stem_mp3 and piano_stem_mp3.is_file():
-        selected_source = "piano"
-        selected_stem_mp3 = _ensure_flat_target_stem_mp3(stems, stems_root, "piano")
-        midi_source_reason = "guitar 무효 + piano stem 품질 통과"
+    selected_source, selected_stem_mp3, midi_source_reason = _select_midi_source_stem(
+        stems,
+        stems_root,
+        mp3_path,
+        guitar_quality,
+        piano_quality,
+    )
     report(33, "source", f"MIDI 소스 선택: {selected_source} ({midi_source_reason})")
 
     if guitar_stem_mp3 and guitar_stem_mp3.is_file():
