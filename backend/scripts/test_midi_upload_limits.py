@@ -14,6 +14,12 @@ from fastapi import HTTPException
 
 # backend 루트를 path에 추가
 _BACKEND = Path(__file__).resolve().parents[1]
+_WORKSPACE = _BACKEND.parent
+sys.path = [
+    item
+    for item in sys.path
+    if Path(item or ".").resolve() != _WORKSPACE
+]
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
