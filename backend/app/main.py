@@ -64,6 +64,8 @@ class PipelineProgressResponse(BaseModel):
 
 
 _PIPELINE_PROGRESS: dict[str, dict[str, Any]] = {}
+MAX_MIDI_UPLOAD_BYTES = 5 * 1024 * 1024
+_MIDI_UPLOAD_READ_CHUNK_BYTES = 64 * 1024
 
 
 def _sanitize_upload_filename(filename: str) -> str:
@@ -73,6 +75,22 @@ def _sanitize_upload_filename(filename: str) -> str:
     if not safe:
         safe = "uploaded.mid"
     return safe
+
+
+async def _read_midi_upload_limited(file: UploadFile) -> bytes:
+    data = bytearray()
+    while True:
+        chunk = await file.read(_MIDI_UPLOAD_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        if len(data) + len(chunk) > MAX_MIDI_UPLOAD_BYTES:
+            limit_mb = MAX_MIDI_UPLOAD_BYTES // (1024 * 1024)
+            raise HTTPException(
+                status_code=413,
+                detail=f"MIDI 파일은 최대 {limit_mb}MB까지 업로드할 수 있습니다.",
+            )
+        data.extend(chunk)
+    return bytes(data)
 
 
 @app.get("/health")
@@ -168,7 +186,7 @@ async def midi_tab_preview(file: UploadFile = File(...)) -> MidiTabPreviewRespon
         if not (lower_name.endswith(".mid") or lower_name.endswith(".midi")):
             raise HTTPException(status_code=400, detail="MIDI 파일(.mid, .midi)만 지원합니다.")
 
-        data = await file.read()
+        data = await _read_midi_upload_limited(file)
         if not data:
             raise HTTPException(status_code=400, detail="업로드한 MIDI 파일이 비어 있습니다.")
 
