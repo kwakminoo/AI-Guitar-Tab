@@ -66,6 +66,7 @@ STEM_QUALITY_SILENT_PEAK_DB = -30.0
 STEM_QUALITY_NOISE_FLATNESS = 0.42
 STEM_QUALITY_NOISE_ZCR = 0.22
 STEM_QUALITY_MIN_ONSETS = 6
+STEM_QUALITY_MAX_WINDOWS = 3
 
 
 @dataclass(frozen=True)
@@ -1630,15 +1631,13 @@ def _to_dbfs(amp: float, *, floor: float = -120.0) -> float:
     return float(20.0 * math.log10(max(1e-12, amp)))
 
 
-def _analyze_stem_quality(audio_path: Path) -> dict[str, Any]:
-    """
-    가벼운 통계 기반 스템 품질 판별.
-    실패 시에도 안전한 결과를 반환한다.
-    """
+def _empty_stem_quality(audio_path: Path | None) -> dict[str, Any]:
     out: dict[str, Any] = {
         "path": str(audio_path),
         "exists": bool(audio_path and audio_path.is_file()),
         "duration_sec": 0.0,
+        "source_duration_sec": None,
+        "analysis_offset_sec": 0.0,
         "sample_rate": 0,
         "rms_db": -120.0,
         "peak_db": -120.0,
@@ -1650,14 +1649,63 @@ def _analyze_stem_quality(audio_path: Path) -> dict[str, Any]:
         "is_playable_source": False,
         "analysis_error": None,
     }
-    if not audio_path or not audio_path.is_file():
-        out["analysis_error"] = "missing_stem_file"
-        return out
+    return out
+
+
+def _stem_quality_offsets(source_duration_sec: float | None) -> list[float]:
+    if source_duration_sec is None or not math.isfinite(source_duration_sec):
+        return [0.0]
+    duration = max(0.0, float(source_duration_sec))
+    if duration <= STEM_QUALITY_ANALYZE_MAX_SEC:
+        return [0.0]
+
+    max_offset = max(0.0, duration - STEM_QUALITY_ANALYZE_MAX_SEC)
+    candidates = [
+        0.0,
+        max(0.0, (duration - STEM_QUALITY_ANALYZE_MAX_SEC) / 2.0),
+        max_offset,
+    ]
+    out: list[float] = []
+    for offset in candidates:
+        rounded = round(float(offset), 3)
+        if all(abs(rounded - prev) > 1.0 for prev in out):
+            out.append(rounded)
+        if len(out) >= STEM_QUALITY_MAX_WINDOWS:
+            break
+    return out or [0.0]
+
+
+def _quality_window_summary(item: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "analysis_offset_sec",
+        "duration_sec",
+        "rms_db",
+        "peak_db",
+        "zcr",
+        "onset_count",
+        "spectral_flatness_mean",
+        "is_silent_like",
+        "is_noise_like",
+        "is_playable_source",
+        "analysis_error",
+    )
+    return {k: item.get(k) for k in keys}
+
+
+def _analyze_stem_quality_window(audio_path: Path, offset_sec: float) -> dict[str, Any]:
+    out = _empty_stem_quality(audio_path)
+    out["analysis_offset_sec"] = round(max(0.0, float(offset_sec)), 3)
     try:
         import librosa
         import numpy as np
 
-        y, sr = librosa.load(str(audio_path), sr=22050, mono=True, duration=STEM_QUALITY_ANALYZE_MAX_SEC)
+        y, sr = librosa.load(
+            str(audio_path),
+            sr=22050,
+            mono=True,
+            duration=STEM_QUALITY_ANALYZE_MAX_SEC,
+            offset=max(0.0, float(offset_sec)),
+        )
         if y is None or len(y) == 0:
             out["analysis_error"] = "empty_audio_after_decode"
             return out
@@ -1714,6 +1762,46 @@ def _analyze_stem_quality(audio_path: Path) -> dict[str, Any]:
     except Exception as exc:
         out["analysis_error"] = str(exc)
         return out
+
+
+def _analyze_stem_quality(audio_path: Path) -> dict[str, Any]:
+    """
+    가벼운 통계 기반 스템 품질 판별.
+    긴 음원은 앞부분만 보고 무효 처리하지 않도록 중간/후반 창도 확인한다.
+    """
+    if not audio_path or not audio_path.is_file():
+        out = _empty_stem_quality(audio_path)
+        out["analysis_error"] = "missing_stem_file"
+        return out
+
+    source_duration_sec = _probe_audio_duration_sec(audio_path)
+    windows: list[dict[str, Any]] = []
+    for offset in _stem_quality_offsets(source_duration_sec):
+        item = _analyze_stem_quality_window(audio_path, offset)
+        item["source_duration_sec"] = (
+            round(float(source_duration_sec), 3)
+            if source_duration_sec is not None and math.isfinite(float(source_duration_sec))
+            else None
+        )
+        windows.append(item)
+        if item.get("is_playable_source"):
+            break
+
+    if not windows:
+        out = _empty_stem_quality(audio_path)
+        out["analysis_error"] = "no_analysis_windows"
+    else:
+        out = max(
+            windows,
+            key=lambda item: (
+                bool(item.get("is_playable_source")),
+                int(item.get("onset_count") or 0),
+                float(item.get("peak_db") or -120.0),
+                float(item.get("rms_db") or -120.0),
+            ),
+        )
+    out["analysis_windows"] = [_quality_window_summary(item) for item in windows]
+    return out
 
 
 def _basic_pitch_to_midi(guitar_audio: Path, midi_out: Path) -> Path:
