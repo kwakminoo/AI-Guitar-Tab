@@ -1177,6 +1177,12 @@ def _validate_alphatex_with_alphatab(tex: str) -> dict[str, Any]:
 
     root_dir = Path(__file__).resolve().parents[3]
     frontend_dir = root_dir / "frontend"
+    alphatab_asset_path = frontend_dir / "public" / "alphatab-assets" / "alphaTab.mjs"
+    alphatab_module_spec = (
+        alphatab_asset_path.resolve().as_uri()
+        if alphatab_asset_path.is_file()
+        else "@coderline/alphatab"
+    )
 
     tmp_root = frontend_dir / ".tmp-alphatex-validator"
     tmp_root.mkdir(parents=True, exist_ok=True)
@@ -1190,8 +1196,9 @@ def _validate_alphatex_with_alphatab(tex: str) -> dict[str, Any]:
         node_mjs_path.write_text(
             r"""
 import fs from 'fs';
-import * as alphaTab from '@coderline/alphatab';
 
+const modulePath = process.argv[3] ?? '@coderline/alphatab';
+const alphaTab = await import(modulePath);
 const { AlphaTexLexer, AlphaTexParser, AlphaTexParseMode, AlphaTexNodeType } = alphaTab.importer.alphaTex;
 
 const inputPath = process.argv[2];
@@ -1379,7 +1386,7 @@ console.log(JSON.stringify({
         )
 
         completed = subprocess.run(
-            ["node", str(node_mjs_path), str(tex_path)],
+            ["node", str(node_mjs_path), str(tex_path), alphatab_module_spec],
             cwd=str(frontend_dir),
             capture_output=True,
             text=True,
