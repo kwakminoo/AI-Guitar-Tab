@@ -18,11 +18,7 @@ from typing import Any, Callable
 
 import pretty_midi
 
-from .beat_audio import (
-    analyze_onsets_from_guitar_audio,
-    snap_midi_notes_to_sixteenth_grid,
-    snap_midi_notes_to_tempo_grid,
-)
+from .beat_audio import analyze_onsets_from_guitar_audio
 from .lyrics_lrclib import fetch_lyrics_from_lrclib, parse_artist_and_track_from_youtube_title
 from .omnizart_guitar import extract_guitar_tab_hints_from_midi
 from .tab_playback import refine_note_events_with_reference_midi, write_tab_compare_artifacts
@@ -3043,20 +3039,7 @@ def run_four_step_pipeline(
     midi_bpm = _primary_bpm_from_midi(midi_for_bpm)
     report(58, "tempo", f"MIDI 템포 BPM≈{midi_bpm:.1f}")
 
-    try:
-        midi_adjust = pretty_midi.PrettyMIDI(str(midi_path))
-        if render_preset.unified_grid:
-            snap_midi_notes_to_tempo_grid(
-                midi_adjust,
-                midi_bpm,
-                [],
-                subdivisions_per_quarter=render_preset.subdivisions_per_quarter,
-            )
-        else:
-            snap_midi_notes_to_sixteenth_grid(midi_adjust, midi_bpm, [])
-        midi_adjust.write(str(midi_path))
-    except Exception as exc:
-        report(62, "quantize", f"MIDI 16분 그리드 스냅 생략/실패: {exc}")
+    report(62, "quantize", "원본 MIDI 보존: 렌더 단계에서만 그리드 양자화 적용")
 
     report(65, "onset", f"{selected_source} stem onset 추출(음 과다 표기 완화)")
     onset_meta = analyze_onsets_from_guitar_audio(selected_stem_mp3, bpm_hint=midi_bpm)
