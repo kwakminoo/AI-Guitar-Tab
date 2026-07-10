@@ -11,6 +11,12 @@ const frontendRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(frontendRoot, "..");
 const dist = path.join(repoRoot, "vendor", "alphaTab", "packages", "alphatab", "dist");
 const dest = path.join(frontendRoot, "public", "alphatab-assets");
+const requiredAssets = [
+  "alphaTab.mjs",
+  "alphaTab.worker.mjs",
+  path.join("font", "Bravura.woff2"),
+  path.join("soundfont", "sonivox.sf3"),
+];
 
 function copyFile(src, dst) {
   fs.mkdirSync(path.dirname(dst), { recursive: true });
@@ -28,8 +34,16 @@ function copyDir(srcDir, destDir) {
   }
 }
 
+function hasExistingAssets() {
+  return requiredAssets.every((asset) => fs.existsSync(path.join(dest, asset)));
+}
+
 if (!fs.existsSync(dist)) {
-  console.error("missing vendor dist:", dist);
+  if (hasExistingAssets()) {
+    console.warn("missing vendor dist, keeping existing alphatab-assets:", dist);
+    process.exit(0);
+  }
+  console.error("missing vendor dist and alphatab-assets:", dist);
   process.exit(1);
 }
 
