@@ -2802,6 +2802,8 @@ def _midi_to_score(
     capo: int = 0,
     tempo_override: float | None = None,
     onset_times_sec: list[float] | None = None,
+    preset: TabRenderPreset = TRANSCRIPTION_PRESET,
+    arrangement_relax_level: int = 0,
 ) -> dict[str, Any]:
     tab_hints = extract_guitar_tab_hints_from_midi(midi_path)
     midi = pretty_midi.PrettyMIDI(str(midi_path))
@@ -2818,16 +2820,19 @@ def _midi_to_score(
     max_end = max(max_end, 0.01)
     bars_info = _compute_bars_info(midi, max_end, bpm_override=tempo_override)
     chord_labels = _bar_chord_labels(raw_notes, bars_info, int(capo))
+    if preset.name == "arrangement":
+        chord_labels = _smooth_bar_chord_labels(chord_labels)
 
     beats, _grid_step_sec = _quantized_beats_from_midi(
         midi,
         tempo,
-        preset=TRANSCRIPTION_PRESET,
+        preset=preset,
         onset_times_sec=onset_times_sec,
         tab_hints=tab_hints,
         bars_info=bars_info,
         bar_chords=chord_labels,
         capo=capo,
+        max_notes_per_slot=MAX_NOTES_PER_SLOT + max(0, int(arrangement_relax_level)),
     )
 
     return {
@@ -3084,6 +3089,7 @@ def run_four_step_pipeline(
     report(85, "alphatex", f"MIDI를 AlphaTex 문법으로 변환 시작 (mode={render_mode})")
     tab_experiment: dict[str, Any] = {}
     arrangement_retry_applied = False
+    arrangement_relax_level_final = 0
     arrangement_recall_initial: float | None = None
     arrangement_recall_final: float | None = None
     arrangement_min_recall = _parse_arrangement_min_recall()
@@ -3125,6 +3131,7 @@ def run_four_step_pipeline(
                 arrangement_relax_level=1,
             )
             arrangement_recall_final = _extract_pitch_onset_recall_from_compare_report(report_path)
+            arrangement_relax_level_final = 1
     else:
         alphatex = _render_transcription_alphatex(
             midi_path,
@@ -3146,6 +3153,8 @@ def run_four_step_pipeline(
         capo=capo_guess,
         tempo_override=midi_bpm,
         onset_times_sec=onset_times_out,
+        preset=render_preset,
+        arrangement_relax_level=arrangement_relax_level_final,
     )
     (job_dir / "tab").mkdir(parents=True, exist_ok=True)
     (job_dir / "tab" / "guitar.alphatex").write_text(alphatex, encoding="utf-8")
