@@ -28,7 +28,11 @@ def _make_off_grid_midi(path: Path) -> None:
 
 def _first_note_time(score: dict) -> float:
     beats = score["tracks"][0]["beats"]
-    return float(beats[0]["notes"][0]["start"])
+    for beat in beats:
+        notes = beat.get("notes") or []
+        if notes:
+            return float(notes[0]["start"])
+    raise AssertionError("score has no notes")
 
 
 def main() -> None:
