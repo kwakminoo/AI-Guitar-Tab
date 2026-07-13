@@ -1,5 +1,6 @@
 import asyncio
 import json
+import uuid
 from urllib.parse import urlparse
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,8 @@ class PipelineProgressResponse(BaseModel):
 
 
 _PIPELINE_PROGRESS: dict[str, dict[str, Any]] = {}
+MAX_MIDI_UPLOAD_BYTES = 5 * 1024 * 1024
+_MIDI_UPLOAD_READ_CHUNK_BYTES = 64 * 1024
 
 
 def _sanitize_upload_filename(filename: str) -> str:
@@ -73,6 +76,34 @@ def _sanitize_upload_filename(filename: str) -> str:
     if not safe:
         safe = "uploaded.mid"
     return safe
+
+
+async def _read_midi_upload_limited(file: UploadFile) -> bytes:
+    data = bytearray()
+    while True:
+        chunk = await file.read(_MIDI_UPLOAD_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        if len(data) + len(chunk) > MAX_MIDI_UPLOAD_BYTES:
+            limit_mb = MAX_MIDI_UPLOAD_BYTES // (1024 * 1024)
+            raise HTTPException(
+                status_code=413,
+                detail=f"MIDI 파일은 최대 {limit_mb}MB까지 업로드할 수 있습니다.",
+            )
+        data.extend(chunk)
+    return bytes(data)
+
+
+def _create_midi_upload_dir(uploads_dir: Path, filename: str) -> Path:
+    stem = Path(filename).stem or "uploaded"
+    for _ in range(5):
+        candidate = uploads_dir / f"{stem}-{uuid.uuid4().hex[:12]}"
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            continue
+    raise HTTPException(status_code=500, detail="업로드 작업 디렉터리를 만들 수 없습니다.")
 
 
 @app.get("/health")
@@ -168,17 +199,17 @@ async def midi_tab_preview(file: UploadFile = File(...)) -> MidiTabPreviewRespon
         if not (lower_name.endswith(".mid") or lower_name.endswith(".midi")):
             raise HTTPException(status_code=400, detail="MIDI 파일(.mid, .midi)만 지원합니다.")
 
-        data = await file.read()
+        data = await _read_midi_upload_limited(file)
         if not data:
             raise HTTPException(status_code=400, detail="업로드한 MIDI 파일이 비어 있습니다.")
 
         uploads_dir = Path("data") / "uploads"
-        uploads_dir.mkdir(parents=True, exist_ok=True)
-        midi_path = uploads_dir / filename
+        upload_dir = _create_midi_upload_dir(uploads_dir, filename)
+        midi_path = upload_dir / filename
         midi_path.write_bytes(data)
 
         title = Path(filename).stem or "Uploaded MIDI"
-        tab_q_dir = uploads_dir / "tab_preview" / Path(filename).stem
+        tab_q_dir = upload_dir / "tab_preview"
         tab_q_dir.mkdir(parents=True, exist_ok=True)
         score = _midi_to_score(midi_path, title=title, capo=0)
         alphatex = _midi_to_alphatex(
