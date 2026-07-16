@@ -1,6 +1,7 @@
 """탭 note_events → MIDI export 및 원본 MIDI와의 온셋 비교."""
 from __future__ import annotations
 
+from bisect import bisect_left
 import json
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,30 @@ def _collect_guitar_notes(midi: pretty_midi.PrettyMIDI) -> list[pretty_midi.Note
     return out
 
 
+def _reference_starts_by_pitch(
+    ref_notes: list[pretty_midi.Note],
+) -> dict[int, list[float]]:
+    starts_by_pitch: dict[int, list[float]] = {}
+    for note in ref_notes:
+        starts_by_pitch.setdefault(int(note.pitch), []).append(float(note.start))
+    return starts_by_pitch
+
+
+def _nearest_reference_start(
+    starts_by_pitch: dict[int, list[float]],
+    query_t: float,
+    pitch: int,
+    tolerance_sec: float,
+) -> float | None:
+    starts = starts_by_pitch.get(pitch)
+    if not starts or tolerance_sec < 0:
+        return None
+    index = bisect_left(starts, query_t)
+    candidates = starts[max(0, index - 1) : index + 1]
+    nearest = min(candidates, key=lambda start: (abs(start - query_t), start))
+    return nearest if abs(nearest - query_t) <= tolerance_sec else None
+
+
 def compare_tab_midi_to_reference(
     reference_midi_path: Path,
     tab_note_events: list[dict[str, Any]],
@@ -64,6 +89,7 @@ def compare_tab_midi_to_reference(
 ) -> dict[str, Any]:
     ref = pretty_midi.PrettyMIDI(str(reference_midi_path))
     ref_notes = _collect_guitar_notes(ref)
+    starts_by_pitch = _reference_starts_by_pitch(ref_notes)
     tab_notes: list[tuple[float, int]] = []
     for n in tab_note_events:
         st = float(n["start"])
@@ -75,24 +101,23 @@ def compare_tab_midi_to_reference(
     tab_notes.sort(key=lambda x: (x[0], x[1]))
     tol = float(onset_tolerance_sec)
 
-    def nearest_ok(query_t: float, pitch: int) -> bool:
-        best = tol * 10
-        for rn in ref_notes:
-            if int(rn.pitch) != pitch:
-                continue
-            d = abs(float(rn.start) - query_t)
-            if d < best:
-                best = d
-        return best <= tol
-
-    hits = sum(1 for st, p in tab_notes if nearest_ok(st, p))
+    hits = sum(
+        1
+        for st, p in tab_notes
+        if _nearest_reference_start(starts_by_pitch, st, p, tol) is not None
+    )
     onset_match_rate = (hits / len(tab_notes)) if tab_notes else 1.0
-    recall_hits = 0
-    for rn in ref_notes:
-        rs = float(rn.start)
-        rp = int(rn.pitch)
-        if any(abs(st - rs) <= tol and p == rp for st, p in tab_notes):
-            recall_hits += 1
+    tab_starts_by_pitch: dict[int, list[float]] = {}
+    for start, pitch in tab_notes:
+        tab_starts_by_pitch.setdefault(pitch, []).append(start)
+    recall_hits = sum(
+        1
+        for rn in ref_notes
+        if _nearest_reference_start(
+            tab_starts_by_pitch, float(rn.start), int(rn.pitch), tol
+        )
+        is not None
+    )
     recall = (recall_hits / len(ref_notes)) if ref_notes else 1.0
     f1 = 0.0 if onset_match_rate + recall <= 1e-9 else 2 * onset_match_rate * recall / (onset_match_rate + recall)
     return {
@@ -114,23 +139,16 @@ def nudge_note_events_toward_reference(
     """원본과 피치·온셋이 가까우면 탭 노트 시작만 원본 온셋에 맞춘다."""
     ref = pretty_midi.PrettyMIDI(str(reference_midi_path))
     ref_notes = _collect_guitar_notes(ref)
+    starts_by_pitch = _reference_starts_by_pitch(ref_notes)
     tol = float(onset_tolerance_sec)
     out: list[dict[str, Any]] = []
     for n in note_events:
         cp = {**n}
         pitch = string_fret_to_midi_pitch(int(cp["string"]), int(cp["fret"]))
         st = float(cp["start"])
-        best: pretty_midi.Note | None = None
-        best_d = tol * 10
-        for rn in ref_notes:
-            if int(rn.pitch) != pitch:
-                continue
-            d = abs(float(rn.start) - st)
-            if d < best_d:
-                best_d = d
-                best = rn
-        if best is not None and best_d <= tol:
-            cp["start"] = float(best.start)
+        nearest = _nearest_reference_start(starts_by_pitch, st, pitch, tol)
+        if nearest is not None:
+            cp["start"] = nearest
         out.append(cp)
     return out
 
