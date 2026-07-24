@@ -395,6 +395,7 @@ def _youtube_subtitle_fallback_lyrics(url: str, out_dir: Path) -> str | None:
         sys.executable,
         "-m",
         "yt_dlp",
+        "--no-playlist",
         "--skip-download",
         "--write-auto-subs",
         "--write-subs",
@@ -1486,7 +1487,21 @@ def _run(command: list[str], cwd: Path | None = None) -> None:
 def _download_mp3(url: str, out_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     target = out_dir / "source.mp3"
-    _run([sys.executable, "-m", "yt_dlp", "-x", "--audio-format", "mp3", "-o", str(target), url])
+    # --no-playlist: 단일 탭 미리보기 요청이 재생목록 전체 다운로드로 확장되지 않게 한다.
+    _run(
+        [
+            sys.executable,
+            "-m",
+            "yt_dlp",
+            "--no-playlist",
+            "-x",
+            "--audio-format",
+            "mp3",
+            "-o",
+            str(target),
+            url,
+        ]
+    )
     if not target.exists():
         raise RuntimeError("yt-dlp 다운로드 후 mp3 파일을 찾지 못했습니다.")
     return target
@@ -1498,7 +1513,16 @@ def _fetch_youtube_meta(url: str) -> tuple[str, str | None, str | None, float | 
     가사는 LRCLIB 등에서 별도 해석한다.
     """
     completed = subprocess.run(
-        [sys.executable, "-m", "yt_dlp", "--dump-single-json", "--skip-download", "--no-warnings", url],
+        [
+            sys.executable,
+            "-m",
+            "yt_dlp",
+            "--no-playlist",
+            "--dump-single-json",
+            "--skip-download",
+            "--no-warnings",
+            url,
+        ],
         capture_output=True,
         text=True,
         encoding="utf-8",

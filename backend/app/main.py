@@ -1,6 +1,6 @@
 import asyncio
 import json
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from pathlib import Path
 from typing import Any
 
@@ -34,9 +34,34 @@ class PipelineRequest(BaseModel):
 
 
 def _is_supported_youtube_url(raw_url: str) -> bool:
+    """
+    단일 영상 URL만 허용한다.
+    playlist 전용 URL은 yt-dlp가 목록 전체를 받아 리소스 고갈·잘못된 음원으로
+    이어질 수 있어 거부한다. (호출부 yt-dlp에도 --no-playlist 를 둔다)
+    """
     parsed = urlparse(raw_url)
     host = (parsed.hostname or "").lower()
-    return host in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
+    if host not in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}:
+        return False
+
+    path = (parsed.path or "").rstrip("/")
+    path_l = path.lower()
+    if path_l == "/playlist" or path_l.startswith("/playlist/"):
+        return False
+
+    if host == "youtu.be":
+        video_id = path.lstrip("/").split("/", 1)[0].strip()
+        return bool(video_id)
+
+    query = parse_qs(parsed.query)
+    video_ids = [v.strip() for v in query.get("v", []) if isinstance(v, str) and v.strip()]
+    if video_ids:
+        return True
+
+    parts = [p for p in path_l.split("/") if p]
+    if len(parts) >= 2 and parts[0] in {"shorts", "embed", "live", "v"} and parts[1].strip():
+        return True
+    return False
 
 
 class YoutubeTabPreviewResponse(BaseModel):
