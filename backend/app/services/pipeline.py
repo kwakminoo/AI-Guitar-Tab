@@ -408,16 +408,20 @@ def _youtube_subtitle_fallback_lyrics(url: str, out_dir: Path) -> str | None:
         str(output_tpl),
         url,
     ]
-    subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=180,
-        check=False,
-    )
+    try:
+        subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=180,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        # 자막은 선택 단계다. 시간 초과로 파이프라인 전체를 끊지 않고, 받은 vtt만 사용한다.
+        pass
     candidates = sorted(out_dir.glob("*.ko-orig.vtt"), reverse=True) + sorted(
         out_dir.glob("*.ko.vtt"), reverse=True
     )
